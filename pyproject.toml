@@ -1,0 +1,45 @@
+[project]
+name = "nemo-rl-lab"
+version = "0.1.0"
+description = "本机开发期工具环境：统一 CLI（lab）与数据预处理。重型训练依赖（NeMo-RL / vLLM / Ray / CUDA）走集群官方容器，不在此管理。"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12", # 统一 CLI 入口 lab
+    "datasets>=2.18",
+    "pyyaml>=6", # 解析/校验实验 config.yaml（lab validate）
+]
+
+[project.optional-dependencies]
+# 开发/CI：lint + 测试。安装：uv sync --extra dev
+dev = ["pytest>=8", "ruff>=0.5", "pyyaml>=6"]
+
+[project.scripts]
+# 安装后提供 `lab` 命令；`uv run lab ...` 直接可用，仓库根的 ./lab 是它的薄 shim。
+lab = "nemo_rl_lab.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# 只打包 CLI 包；common/ configs/ 等是运行期按路径访问的仓库数据，靠 editable 安装就地访问。
+packages = ["nemo_rl_lab"]
+
+[tool.pytest.ini_options]
+# 让测试能 import 仓库根的 common / nemo_rl_lab（无需安装 common 包）。
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+# E501: 行宽交给 line-length；B008: Typer 惯用法（默认值里调用 typer.Option/Argument），非缺陷。
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# 实验入口脚本须先 sys.path.insert(REPO_ROOT) 再 import nemo_rl / common（运行时按路径访问，
+# 不安装成包），故 import 不在文件顶部是有意为之——对这类入口豁免 E402。
+"experiments/*/run.py" = ["E402"]

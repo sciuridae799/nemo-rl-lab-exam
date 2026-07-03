@@ -1,0 +1,50 @@
+# grpo_qwen3.5-9b_gsm8k_v1
+
+单轮 GRPO 实验：`qwen3.5-9b` 在 GSM8K 上做数学推理。作为多轮 Agent 实验的**对照**
+（同模型、同 GRPO，但单轮、无工具）。
+
+## 目标
+
+用标准 GRPO（`max_rollout_turns=1`）在 GSM8K 上训练，观察答对率随训练提升，与
+`agent-grpo_qwen3.5-9b_sliding-puzzle_v1` 的多轮 Agent 范式对比。
+
+## 数据准备（先做）
+
+GSM8K 的答案是「推理 + #### 数字」，需抽取干净金标准答案：
+
+```bash
+# 在仓库根目录
+lab prepare gsm8k                              # 写到 datasets/gsm8k/{train,val}.jsonl
+```
+
+- **`lab submit`（经服务端到集群）**：`datasets/gsm8k/` 随作业上传，`run.sh` 自动把 `GSM8K_DATA_DIR` 指向它，**无需手动 export**；想用别处的数据时由服务端注入 `GSM8K_DATA_DIR=/abs/dir` 覆盖。
+
+## 组成
+
+- `config.yaml` — 继承 `grpo_math_1B` + `qwen3.5-9b` + `grpo_megatron`(Megatron+GB10 调优) + `grpo_lora`(LoRA)，
+  `_override_` 替换 `data` 为 `ResponseDataset` 指向上面的 jsonl，处理器 `math_hf_data_processor`、环境 `math`。
+- `run.sh` — 无自定义 `run.py`，自动用官方入口 `examples/run_grpo.py`。
+
+## 关键超参（GB10 实测起点）
+
+- 后端：Megatron-Core + **LoRA**（dim8/alpha16，lr 1e-4，wd 0，cosine）。回全参数：删 `defaults` 里 `grpo_lora.yaml`。
+- batch：`num_prompts_per_step=4`、`num_generations_per_prompt=8`、`train_global_batch_size=32`、`micro=1`、`seq=1250`。
+- 显存紧：降 `max_total_sequence_length`、`gpu_memory_utilization`，或减 `num_generations_per_prompt`（注意 global 要整除 prompts×gen）。
+
+## SwanLab
+
+- project：`grpo_qwen3.5-9b_gsm8k_v1`，run：`lora-lr1e4-g8-kl0.01`，链接：<回填>
+
+## 运行
+
+```bash
+# 确保已 export GSM8K_DATA_DIR
+NEMO_RL_DIR=/path/to/NeMo-RL CLUSTER_PROFILE=gb10-spark bash run.sh
+```
+
+产物落到本目录 `outputs/`（已 .gitignore）。
+
+## 结果与结论
+
+- 关键指标：val:accuracy / reward
+- 结论 / 下一步：
