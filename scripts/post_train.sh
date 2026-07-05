@@ -116,12 +116,12 @@ do_export() {
   run cd "${NEMO_RL_DIR}"
   if [[ "${BACKEND}" == "megatron" ]]; then
     # Megatron 转换需要 mcore extra；权重路径指向 iter_* 目录。
-    run uv run --extra mcore python examples/converters/convert_megatron_to_hf.py \
+    run uv run --no-sync --extra mcore python examples/converters/convert_megatron_to_hf.py \
       --config "${STEP_CONFIG}" \
       --megatron-ckpt-path "${MCORE_WEIGHTS:-${WEIGHTS_DIR}/iter_0000000}" \
       --hf-ckpt-path "${out}"
   else
-    run uv run python examples/converters/convert_dcp_to_hf.py \
+    run uv run --no-sync python examples/converters/convert_dcp_to_hf.py \
       --config "${STEP_CONFIG}" \
       --dcp-ckpt-path "${WEIGHTS_DIR}" \
       --hf-ckpt-path "${out}"
@@ -135,7 +135,7 @@ do_export() {
   # 可选：推送到 HuggingFace Hub（需 HF_TOKEN）。新版 CLI 用 `hf upload`（huggingface-cli 已废弃）。
   if [[ -n "${PUSH_REPO}" ]]; then
     [[ "${DRY}" == "1" ]] || : "${HF_TOKEN:?推送 Hub 需要 HF_TOKEN（由中心化服务在集群侧注入）}"
-    run uv run hf upload "${PUSH_REPO}" "${out}" --repo-type model
+    run uv run --no-sync hf upload "${PUSH_REPO}" "${out}" --repo-type model
     echo "[post] 已推送到 https://huggingface.co/${PUSH_REPO}"
   fi
   echo "[post] export 完成 → ${out}"
@@ -155,7 +155,7 @@ do_eval() {
   echo "[post] eval config: ${EVAL_CONFIG}"
   run cd "${NEMO_RL_DIR}"
   # `${arr[@]+"${arr[@]}"}`：兼容 set -u 下的空数组（含 macOS 自带 bash 3.2）。
-  run uv run python examples/run_eval.py \
+  run uv run --no-sync python examples/run_eval.py \
     --config "${EVAL_CONFIG}" \
     "generation.model_name=${model}" \
     ${EVAL_OVERRIDES[@]+"${EVAL_OVERRIDES[@]}"}

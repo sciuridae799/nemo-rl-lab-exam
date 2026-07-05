@@ -27,7 +27,7 @@ if command -v huggingface-cli >/dev/null 2>&1; then
   huggingface-cli download "${MODEL_ID}" --token "${HF_TOKEN:-}"
 elif [[ -n "${NEMO_RL_DIR:-}" && -d "${NEMO_RL_DIR}" ]]; then
   cd "${NEMO_RL_DIR}"
-  uv run python -c "
+  uv run --no-sync python -c "
 from huggingface_hub import snapshot_download
 import os
 snapshot_download(

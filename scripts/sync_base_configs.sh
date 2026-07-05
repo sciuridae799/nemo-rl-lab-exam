@@ -3,4 +3,4 @@
 # 用法： NEMO_RL_DIR=/path/to/NeMo-RL bash scripts/sync_base_configs.sh
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec uv run --project "${REPO_ROOT}" python -m nemo_rl_lab.sync_base "$@"
+exec uv run --no-sync --project "${REPO_ROOT}" python -m nemo_rl_lab.sync_base "$@"
