@@ -23,5 +23,7 @@
 ## 示例文件
 
 [`examples.jsonl`](examples.jsonl) — 5 条样本，覆盖上述五种题型（客观题来自验证集，简答来自训练集）。
+[`train.jsonl`](train.jsonl) — 真实训练样本示例。
+[`val.jsonl`](val.jsonl) — 真是验证样本示例。
 
 `split` 字段仅作说明（`train` / `val`），正式数据文件中不含此字段。
