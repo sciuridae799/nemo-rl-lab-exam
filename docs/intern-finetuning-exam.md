@@ -131,10 +131,11 @@ lab status    # 查看 GPU 配额与活跃作业
 
 | 实验 | 可参考什么 |
 | --- | --- |
-| `grpo_qwen3.5-9b_gsm8k_v1` | 单轮 GRPO 实验结构 |
+| `grpo_qwen3.5-9b_gsm8k_v1` | 单轮 GRPO 实验结构（官方 `ResponseDataset`） |
+| `grpo_qwen3.5-9b_qa-rl_v1` | **考试数据集格式**、`\boxed{}` 判分、`common/rewards/`、`QARewardEnv`、自定义 `run.py` |
 | `agent-grpo_qwen3.5-9b_sliding-puzzle_v1` | 多轮 Agent GRPO 怎么跑通 |
 
-其余（自定义环境、数据加载、`run.py`、超参）请结合仓库 `common/`、`configs/` 和两个示例实验**自行研究**。
+考试任务需在 sliding-puzzle 多轮结构基础上，自行实现 QA 文档检索 Agent 环境；`qa-rl_v1` 提供判分与数据格式参考，**不是现成答案**。
 
 ### 4.4 创建你的实验
 

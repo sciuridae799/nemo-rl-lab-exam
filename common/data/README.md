@@ -14,4 +14,4 @@
 
 - 脚本入库，**原始 / 大数据不入库**（见根 `.gitignore`）。
 - 处理产物落到 `datasets/<name>/`（小元数据入库，大文件本地 / 对象存储）。
-- 每个数据集一个转换脚本，如 `prepare_gsm8k.py`。
+- 每个数据集一个转换脚本，如 `prepare_gsm8k.py`、`prepare_qa_rl.py`（考试题库；完整数据在集群 `/data/datasets/qa_rl`）。

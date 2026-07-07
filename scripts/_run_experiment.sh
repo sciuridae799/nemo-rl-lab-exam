@@ -96,9 +96,14 @@ fi
 # 经服务端提交时该目录随作业上传（仅排除 raw/data 缓存），
 # 故 config 里的 ${oc.env:GSM8K_DATA_DIR} 等无需手填即可解析；
 # 想用集群上已有的大数据，则由服务端注入同名变量覆盖（或在 config.yaml 写死 data_dir）。
+# qa_rl 例外：考试题库在集群 /data/datasets/qa_rl，仓库内通常只有 examples.jsonl，
+# 若本地无 train.jsonl 则不自动设 QA_RL_DATA_DIR，让 run.py 走 config.data_dir。
 for _ds in gsm8k:GSM8K_DATA_DIR alpaca:ALPACA_DATA_DIR qa_rl:QA_RL_DATA_DIR; do
   _name="${_ds%%:*}"; _var="${_ds##*:}"
   if [[ -z "${!_var:-}" && -d "${REPO_ROOT}/datasets/${_name}" ]]; then
+    if [[ "${_name}" == "qa_rl" && ! -f "${REPO_ROOT}/datasets/${_name}/train.jsonl" ]]; then
+      continue
+    fi
     export "${_var}=${REPO_ROOT}/datasets/${_name}"
     echo "[run] ${_var}=${REPO_ROOT}/datasets/${_name} (默认指向仓库内数据)"
   fi

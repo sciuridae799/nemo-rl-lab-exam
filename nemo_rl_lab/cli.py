@@ -23,6 +23,7 @@ SCRIPTS = ROOT / "scripts"
 DATA_PREP = {
     "gsm8k": ROOT / "common" / "data" / "prepare_gsm8k.py",
     "alpaca": ROOT / "common" / "data" / "prepare_alpaca.py",
+    "qa_rl": ROOT / "common" / "data" / "prepare_qa_rl.py",
 }
 
 app = typer.Typer(
@@ -149,7 +150,7 @@ def new(
 
 
 @app.command(
-    help="预处理数据集（gsm8k / alpaca）",
+    help="预处理数据集（gsm8k / alpaca / qa_rl）",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 def prepare(
