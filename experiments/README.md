@@ -17,3 +17,4 @@ cp -r templates/experiment-template experiments/grpo_qwen3.5-9b_gsm8k_v1
 | `grpo_qwen3.5-9b_gsm8k_v1` | 单轮 GRPO + 官方 `ResponseDataset`（数学） |
 | `grpo_qwen3.5-9b_qa-rl_v1` | 单轮 GRPO + 自定义 QA 判分环境 + `run.py`（考试数据集格式） |
 | `agent-grpo_qwen3.5-9b_sliding-puzzle_v1` | 多轮 Agent GRPO（无外部依赖，先跑通多轮链路） |
+| `grpo_qwen3.5-9b_qa-rl-agent_v1` | 多轮本地 Markdown 检索 + QA 判分（考试实验） |

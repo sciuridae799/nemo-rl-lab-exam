@@ -1,0 +1,62 @@
+# QA 多轮检索 Agent：只新增检索协议，复用现有 QA 数据和奖励。
+defaults:
+  - ../../configs/base/grpo_math_1B.yaml
+  - ../../configs/models/qwen3.5-9b.yaml
+  - ../../configs/base/grpo_megatron.yaml
+  - ../../configs/base/grpo_lora.yaml
+
+policy:
+  model_name: "Qwen/Qwen3.5-9B-Base"
+  tokenizer:
+    name: "Qwen/Qwen3.5-9B-Base"
+  max_total_sequence_length: 4096
+  train_global_batch_size: 16
+  generation_batch_size: 8
+  generation:
+    max_new_tokens: 1280
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 8
+  max_rollout_turns: 3
+  max_num_steps: 60
+  val_period: 10
+  val_at_start: true
+  val_at_end: true
+  max_val_samples: 128
+  val_batch_size: 32
+
+loss_fn:
+  reference_policy_kl_penalty: 0.01
+
+data:
+  shuffle: true
+  input_key: query
+  output_key: expected_answer
+  data_dir: /data/datasets/qa_rl
+  system_prompt: |-
+    你是技术培训考试检索 Agent。不要长篇思考，每轮只能选择一种动作：
+    1. 需要资料时，仅输出 <search>最关键的检索词</search>。
+    2. 能作答时，输出 <answer>简短依据；\boxed{最终答案}</answer>。
+    最多检索两次。检索结果由环境返回，不得编造检索结果。
+    最终答案必须严格遵守题目要求的字母、逗号或分号格式，并且必须放入 \boxed{}。
+
+env:
+  _override_: true
+  qa_search:
+    cfg:
+      docs_dir: /data/docs
+      chunk_chars: 480
+      top_k: 3
+      max_searches: 2
+      max_result_chars: 1200
+      k1: 1.5
+      b: 0.75
+      use_judge: true
+
+logger:
+  wandb_enabled: false
+  tensorboard_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  num_val_samples_to_print: 5
