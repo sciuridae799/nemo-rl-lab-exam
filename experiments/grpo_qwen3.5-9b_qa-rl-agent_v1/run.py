@@ -31,7 +31,12 @@ from nemo_rl.utils.config import (
 )
 from nemo_rl.utils.logger import get_next_experiment_dir
 
-from common.environments.qa_search_core import STOP_STRINGS, qa_type_from_text
+from common.environments.qa_retrieval_eval import evaluate_retrieval_ab
+from common.environments.qa_search_core import (
+    STOP_STRINGS,
+    LocalMarkdownIndex,
+    qa_type_from_text,
+)
 from common.environments.qa_search_env import QASearchEnv
 
 TASK_NAME = "qa_search"
@@ -62,20 +67,8 @@ class QAAgentDataset(Dataset):
         output_key: str,
         system_prompt: str,
         chat_template_kwargs: dict[str, Any] | None = None,
-        balance_open_types: bool = False,
     ):
         self.rows = _read_jsonl(path)
-        if balance_open_types:
-            open_rows = [
-                row
-                for row in self.rows
-                if qa_type_from_text(str(row[input_key])) in {"fill", "short"}
-            ]
-            self.rows.extend(open_rows)
-            print(
-                f"训练集开放题加权：原始 {len(self.rows) - len(open_rows)} 条，"
-                f"新增 {len(open_rows)} 条，最终 {len(self.rows)} 条"
-            )
         self.tokenizer = tokenizer
         self.input_key = input_key
         self.output_key = output_key
@@ -127,6 +120,34 @@ class QAAgentDataset(Dataset):
         }
 
 
+def _run_retrieval_diagnostic(config: MasterConfig) -> None:
+    data_cfg: dict[str, Any] = config.data
+    data_dir = os.environ.get("QA_RL_DATA_DIR") or data_cfg.get("data_dir")
+    if not data_dir:
+        raise SystemExit("缺少 QA_RL_DATA_DIR 或 data.data_dir")
+
+    env_cfg = dict(config.env[TASK_NAME]["cfg"])
+    index = LocalMarkdownIndex(
+        env_cfg.get("docs_dir", "/data/docs"),
+        chunk_chars=int(env_cfg.get("chunk_chars", 480)),
+        k1=float(env_cfg.get("k1", 1.5)),
+        b=float(env_cfg.get("b", 0.75)),
+    )
+    train_rows = _read_jsonl(os.path.join(data_dir, "train.jsonl"))
+    report = evaluate_retrieval_ab(
+        train_rows,
+        index,
+        input_key=str(data_cfg.get("input_key", "query")),
+        output_key=str(data_cfg.get("output_key", "expected_answer")),
+        max_per_type=int(data_cfg.get("retrieval_diagnostic_max_per_type", 64)),
+        seed=int(data_cfg.get("retrieval_diagnostic_seed", config.grpo["seed"])),
+        top_k=int(env_cfg.get("top_k", 3)),
+        candidate_k=int(env_cfg.get("candidate_k", 20)),
+    )
+    print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")
+    print("QA检索A/B：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
 def main():
     register_omegaconf_resolvers()
     args, overrides = parse_args()
@@ -138,6 +159,10 @@ def main():
         config = parse_hydra_overrides(config, overrides)
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))
     pprint.pprint(config)
+
+    if bool(config.data.get("retrieval_diagnostic", False)):
+        _run_retrieval_diagnostic(config)
+        return
 
     config.logger["log_dir"] = get_next_experiment_dir(config.logger["log_dir"])
     init_ray()
@@ -166,7 +191,6 @@ def main():
     train_dataset = QAAgentDataset(
         os.path.join(data_dir, "train.jsonl"),
         *dataset_args,
-        balance_open_types=True,
     )
     val_dataset = QAAgentDataset(os.path.join(data_dir, "val.jsonl"), *dataset_args)
     print(f"训练集 {len(train_dataset)} 条，验证集 {len(val_dataset)} 条")

@@ -19,6 +19,35 @@ _ASCII_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.+-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 _SEARCH = re.compile(r"<search>\s*(.*?)\s*</search>", re.IGNORECASE | re.DOTALL)
+_BLANK_MARKER = re.compile(r"【\s*\d+\s*】|\[\s*\d+\s*]|_{2,}|＿{2,}|\(\s*\)|（\s*）")
+_EXAM_CUE = re.compile(
+    r"填空题|选择题|判断题|简答题|每题\s*\d*\s*分|^\s*\d+[.、)]",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ANSWER_CUE = re.compile(
+    r"是|为|通过|包括|包含|共有|分别|等于|采用|使用|由.{0,24}组成|"
+    r"consists?\s+of|includes?|contains?|there\s+(?:is|are)|\b(?:has|have)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT = re.compile(r"[\n\r。！？!?；;]+")
+_ENGLISH_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "each",
+    "for",
+    "how",
+    "is",
+    "many",
+    "of",
+    "or",
+    "the",
+    "there",
+    "to",
+    "what",
+    "which",
+}
 _QA_TYPE_MARKERS = {
     "single": "一道单选题",
     "multiple": "一道多选题",
@@ -67,6 +96,167 @@ def _terms(text: str) -> list[str]:
             if len(run) <= 12:
                 terms.append(run)
     return terms
+
+
+def compact_text(text: str) -> str:
+    """NFKC、小写并只保留字母数字和汉字，用于稳健的证据匹配。"""
+    return "".join(char for char in _normalize(text) if char.isalnum())
+
+
+def _informative_terms(text: str) -> set[str]:
+    terms = set(_terms(text))
+    return {term for term in terms if not (term.isascii() and term in _ENGLISH_STOPWORDS)}
+
+
+def _term_coverage(question: str, text: str) -> float:
+    question_terms = _informative_terms(_BLANK_MARKER.sub("", question))
+    if not question_terms:
+        return 0.0
+    return len(question_terms & set(_terms(text))) / len(question_terms)
+
+
+def _cloze_bridge_signal(question: str, text: str) -> float:
+    """判断片段是否在填空左右文之间真正给出了内容，而非复刻空题。"""
+    parts = _BLANK_MARKER.split(_normalize(question))
+    if len(parts) < 2:
+        return 0.0
+
+    compact_passage = compact_text(text)
+    signals: list[float] = []
+    for left, right in zip(parts, parts[1:], strict=False):
+        left_compact = compact_text(left)
+        right_compact = compact_text(right)
+        if not left_compact or not right_compact:
+            continue
+        left_anchor = left_compact[-min(14, len(left_compact)) :]
+        right_anchor = right_compact[: min(14, len(right_compact))]
+        left_pos = compact_passage.find(left_anchor)
+        if left_pos < 0:
+            continue
+        gap_start = left_pos + len(left_anchor)
+        right_pos = compact_passage.find(right_anchor, gap_start)
+        if right_pos < 0:
+            continue
+        gap_length = right_pos - gap_start
+        if gap_length == 0:
+            signals.append(-1.0)
+        elif gap_length <= 48:
+            signals.append(1.0)
+        elif gap_length <= 120:
+            signals.append(0.25)
+
+    if any(signal > 0 for signal in signals):
+        return max(signals)
+    return min(signals, default=0.0)
+
+
+def question_copy_score(question: str, text: str) -> float:
+    """识别只复刻题面、没有补出答案的试卷型片段。"""
+    cleaned_question = _BLANK_MARKER.sub("", question)
+    question_compact = compact_text(cleaned_question)
+    if len(question_compact) < 6:
+        return 0.0
+
+    coverage = _term_coverage(question, text)
+    exact_copy = question_compact in compact_text(text)
+    exam_like = bool(_EXAM_CUE.search(text))
+    bridge = _cloze_bridge_signal(question, text)
+    score = 0.0
+    if exam_like and coverage >= 0.65:
+        score = max(score, coverage)
+    if exact_copy and exam_like:
+        score = 1.0
+    if bridge < 0:
+        score = 1.0
+    return score
+
+
+def _best_answer_sentence_score(question: str, text: str) -> float:
+    question_terms = _informative_terms(_BLANK_MARKER.sub("", question))
+    if not question_terms:
+        return 0.0
+    best = 0.0
+    for sentence in _SENTENCE_SPLIT.split(text):
+        sentence_terms = set(_terms(sentence))
+        coverage = len(question_terms & sentence_terms) / len(question_terms)
+        cue_bonus = 0.2 if _ANSWER_CUE.search(sentence) else 0.0
+        best = max(best, min(1.0, coverage + cue_bonus))
+    return best
+
+
+def _content_similarity(left: str, right: str) -> float:
+    left_terms = set(_terms(left))
+    right_terms = set(_terms(right))
+    union = left_terms | right_terms
+    return len(left_terms & right_terms) / len(union) if union else 0.0
+
+
+def rerank_answerable_hits(
+    question: str,
+    hits: list[SearchHit],
+    *,
+    top_k: int,
+) -> list[SearchHit]:
+    """在少量 BM25 候选中优先选择可回答、非重复的证据片段。"""
+    if not hits:
+        return []
+
+    raw_scores = [hit.score for hit in hits]
+    low, high = min(raw_scores), max(raw_scores)
+    question_ascii = {
+        term
+        for term in _ASCII_TOKEN.findall(_normalize(question))
+        if term not in _ENGLISH_STOPWORDS and (len(term) >= 3 or any(c.isdigit() for c in term))
+    }
+    question_numbers = {term for term in _ASCII_TOKEN.findall(_normalize(question)) if any(c.isdigit() for c in term)}
+
+    scored: list[tuple[float, int, SearchHit]] = []
+    for position, hit in enumerate(hits):
+        if high > low:
+            bm25 = (hit.score - low) / (high - low)
+        else:
+            bm25 = 1.0
+        passage = hit.source + "\n" + hit.text
+        coverage = _term_coverage(question, passage)
+        ascii_terms = set(_ASCII_TOKEN.findall(_normalize(passage)))
+        ascii_coverage = len(question_ascii & ascii_terms) / len(question_ascii) if question_ascii else 0.0
+        new_values = {term for term in ascii_terms - question_numbers if any(c.isdigit() for c in term)}
+        value_bonus = min(1.0, len(new_values) / 2.0)
+        answer_cue = 1.0 if _ANSWER_CUE.search(hit.text) else 0.0
+        sentence_score = _best_answer_sentence_score(question, hit.text)
+        bridge = _cloze_bridge_signal(question, hit.text)
+        copy_score = question_copy_score(question, hit.text)
+        score = (
+            0.35 * bm25
+            + 0.20 * coverage
+            + 0.10 * ascii_coverage
+            + 0.20 * sentence_score
+            + 0.10 * answer_cue
+            + 0.05 * value_bonus
+            + 0.75 * max(0.0, bridge)
+            - 0.80 * copy_score
+            - 0.25 * max(0.0, -bridge)
+        )
+        scored.append((score, position, SearchHit(hit.source, hit.text, score)))
+
+    selected: list[SearchHit] = []
+    remaining = list(scored)
+    while remaining and len(selected) < max(1, int(top_k)):
+        best_index = max(
+            range(len(remaining)),
+            key=lambda idx: (
+                remaining[idx][0]
+                - 0.30
+                * max(
+                    (_content_similarity(remaining[idx][2].text, chosen.text) for chosen in selected),
+                    default=0.0,
+                ),
+                -remaining[idx][1],
+            ),
+        )
+        _, _, best_hit = remaining.pop(best_index)
+        selected.append(best_hit)
+    return selected
 
 
 def _split_long(text: str, limit: int, overlap: int = 80) -> Iterable[str]:
@@ -186,6 +376,8 @@ class LocalMarkdownIndex:
         *,
         top_k: int = 3,
         max_per_source: int = 2,
+        candidate_k: int | None = None,
+        rerank_question: str | None = None,
     ) -> list[SearchHit]:
         query_counts = Counter(_terms(query))
         scores: dict[int, float] = defaultdict(float)
@@ -212,10 +404,11 @@ class LocalMarkdownIndex:
                 heapq.heapreplace(heap, item)
 
         candidates = [item for heap in source_heaps.values() for item in heap]
+        candidate_limit = max(1, int(candidate_k or top_k), int(top_k))
         selected = heapq.nlargest(
-            max(1, int(top_k)), candidates, key=lambda item: (item[0], item[1])
+            candidate_limit, candidates, key=lambda item: (item[0], item[1])
         )
-        return [
+        hits = [
             SearchHit(
                 self.chunks[doc_id].source,
                 self.chunks[doc_id].text,
@@ -223,6 +416,9 @@ class LocalMarkdownIndex:
             )
             for score, _, doc_id in selected
         ]
+        if rerank_question:
+            return rerank_answerable_hits(rerank_question, hits, top_k=top_k)
+        return hits[: max(1, int(top_k))]
 
 
 def _last_assistant_text(message_log: list[dict[str, Any]]) -> str:
@@ -301,12 +497,16 @@ class QASearchRunner:
         reward_fn: Callable[..., list[float]],
         *,
         top_k: int = 3,
+        candidate_k: int = 20,
+        answerability_rerank: bool = False,
         max_searches: int = 2,
         max_result_chars: int = 1500,
     ):
         self.index = index
         self.reward_fn = reward_fn
         self.top_k = max(1, int(top_k))
+        self.candidate_k = max(self.top_k, int(candidate_k))
+        self.answerability_rerank = bool(answerability_rerank)
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
 
@@ -415,8 +615,19 @@ class QASearchRunner:
             search_query = match.group(1).strip()
             if not search_query:
                 search_query = _question_text(original_query)
-            retrieval_query = search_query + "\n" + _question_text(original_query)
-            hits = self.index.search(retrieval_query, top_k=self.top_k)
+            question = _question_text(original_query)
+            retrieval_query = search_query + "\n" + question
+            rerank_question = (
+                question
+                if self.answerability_rerank and qa_type_from_text(original_query) in {"fill", "short"}
+                else None
+            )
+            hits = self.index.search(
+                retrieval_query,
+                top_k=self.top_k,
+                candidate_k=self.candidate_k if rerank_question else self.top_k,
+                rerank_question=rerank_question,
+            )
             next_metadata = dict(metadata)
             next_metadata["searches"] = searches + 1
             next_metadata["must_answer"] = searches + 1 >= self.max_searches

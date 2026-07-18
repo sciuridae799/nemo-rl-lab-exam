@@ -7,8 +7,11 @@ import pytest
 from common.environments.qa_search_core import (
     LocalMarkdownIndex,
     QASearchRunner,
+    SearchHit,
     qa_reward_diagnostics,
     qa_type_from_text,
+    question_copy_score,
+    rerank_answerable_hits,
 )
 from common.rewards.qa_reward import FORMAT_PENALTY, qa_rule_reward_fn
 
@@ -171,3 +174,27 @@ def test_reward_diagnostics_reports_type_and_group_variance():
     assert metrics["qa_multi_sample_group_count"] == 2.0
     assert metrics["qa_zero_variance_group_rate"] == 0.5
     assert metrics["qa_effective_group_rate"] == 0.5
+
+
+def test_answerability_rerank_prefers_filled_evidence_over_blank_exam():
+    question = "SERVER ROOM 通过【1】与Clean room进行连接"
+    blank_exam = SearchHit(
+        "试卷.md",
+        "1. 填空题（每题4分）\n3. SERVER ROOM 通过 与Clean room进行连接",
+        100.0,
+    )
+    answer_manual = SearchHit(
+        "操作手册.md",
+        "SERVER ROOM 通过 SQL server 与 Clean room 进行连接。",
+        80.0,
+    )
+
+    ranked = rerank_answerable_hits(
+        question,
+        [blank_exam, answer_manual],
+        top_k=2,
+    )
+
+    assert question_copy_score(question, blank_exam.text) == 1.0
+    assert question_copy_score(question, answer_manual.text) == 0.0
+    assert ranked[0].source == "操作手册.md"
