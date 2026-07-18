@@ -10,21 +10,21 @@ policy:
   tokenizer:
     name: "Qwen/Qwen3.5-9B-Base"
   max_total_sequence_length: 4096
-  train_global_batch_size: 16
+  train_global_batch_size: 8
   generation_batch_size: 8
   generation:
     max_new_tokens: 1280
 
 grpo:
-  num_prompts_per_step: 2
+  num_prompts_per_step: 1
   num_generations_per_prompt: 8
   max_rollout_turns: 3
-  max_num_steps: 60
-  val_period: 10
+  max_num_steps: 2
+  val_period: 1
   val_at_start: true
   val_at_end: true
-  max_val_samples: 128
-  val_batch_size: 32
+  max_val_samples: 16
+  val_batch_size: 16
 
 loss_fn:
   reference_policy_kl_penalty: 0.01
@@ -52,7 +52,7 @@ env:
       max_result_chars: 1200
       k1: 1.5
       b: 0.75
-      use_judge: true
+      use_judge: false
 
 logger:
   wandb_enabled: false
