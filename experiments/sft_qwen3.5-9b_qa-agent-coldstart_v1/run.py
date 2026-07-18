@@ -245,7 +245,11 @@ def main() -> None:
     train_dataset, val_dataset = setup_data(tokenizer, config["data"])
     _seed_f4_weights_only(config, train_dataset)
 
-    master_config: MasterConfig = config
+    # 集群镜像的 0.6.0 MasterConfig 是 Pydantic 属性对象；源码发行版仍可表现为
+    # TypedDict。两者都支持关键字构造，与现有 GRPO 入口保持一致。
+    master_config = MasterConfig(
+        **{key: value for key, value in config.items() if key != "retrieval"}
+    )
     (
         policy,
         _cluster,
@@ -290,4 +294,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
