@@ -10,6 +10,7 @@ from common.environments.qa_search_core import (
     SearchHit,
     build_query_variants,
     evidence_progress_coverage,
+    extract_answerable_snippets,
     qa_loss_multiplier,
     qa_reward_diagnostics,
     qa_type_from_text,
@@ -343,3 +344,18 @@ def test_structural_expansion_adds_adjacent_and_sibling_evidence(tmp_path):
 
     assert any("相邻页说明" in hit.text for hit in expanded)
     assert any(hit.source.endswith("答案.md") for hit in expanded)
+
+
+def test_answerable_snippet_keeps_relevant_sentence_within_budget():
+    question = "设备通过【1】连接洁净室"
+    hit = SearchHit(
+        "设备手册.md",
+        "无关背景。" * 30 + "设备通过数据总线连接洁净室。" + "其他说明。" * 30,
+        2.0,
+    )
+
+    snippets = extract_answerable_snippets(question, [hit], max_chars=80)
+
+    assert len(snippets) == 1
+    assert len(snippets[0].text) <= 80
+    assert "数据总线" in snippets[0].text

@@ -14,6 +14,7 @@ from common.environments.qa_search_core import (
     _question_text,
     build_query_variants,
     compact_text,
+    extract_answerable_snippets,
     question_copy_score,
     rerank_answerable_hits,
 )
@@ -138,6 +139,8 @@ def evaluate_retrieval_ab(
     candidate_max_per_source: int = 4,
     query_expansion: bool = False,
     structural_expansion: bool = False,
+    packing_top_k: int = 8,
+    packing_snippet_chars: int = 140,
 ) -> dict[str, Any]:
     """在训练集开放题上比较原始 BM25 与可回答性重排。"""
     grouped: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
@@ -202,11 +205,29 @@ def evaluate_retrieval_ab(
             top_k=top_k,
             baseline_hits=baseline_hits[:1],
         )
+        snippet_hits = extract_answerable_snippets(
+            question,
+            candidate_hits,
+            max_chars=packing_snippet_chars,
+        )
+        baseline_snippets = extract_answerable_snippets(
+            question,
+            baseline_hits[:1],
+            max_chars=packing_snippet_chars,
+        )
+        packed_hits = rerank_answerable_hits(
+            question,
+            snippet_hits,
+            top_k=packing_top_k,
+            baseline_hits=baseline_snippets,
+        )
         baseline = _retrieval_stats(question, expected, baseline_hits)
         reranked = _retrieval_stats(question, expected, reranked_hits)
         corpus_coverage = _presence_coverage(expected, corpus_presence)
         candidate_coverage = evidence_coverage(expected, raw_candidate_hits)
         expanded_coverage = evidence_coverage(expected, candidate_hits)
+        snippet_pool_coverage = evidence_coverage(expected, snippet_hits)
+        packed_coverage = evidence_coverage(expected, packed_hits)
         baseline_rows.append(baseline)
         reranked_rows.append(reranked)
         per_type[question_type]["baseline"].append(baseline)
@@ -217,6 +238,8 @@ def evaluate_retrieval_ab(
             "baseline_top3": baseline["evidence_coverage"],
             "candidate_pool": candidate_coverage,
             "expanded_pool": expanded_coverage,
+            "snippet_pool": snippet_pool_coverage,
+            f"packed_top{packing_top_k}": packed_coverage,
             "reranked_top3": reranked["evidence_coverage"],
         }
         for stage, coverage in stage_coverages.items():
@@ -266,6 +289,18 @@ def evaluate_retrieval_ab(
             funnel_summary["expanded_pool_evidence_coverage"]
             - funnel_summary["reranked_top3_evidence_coverage"]
         ),
+        "snippet_compression_gap": (
+            funnel_summary["expanded_pool_evidence_coverage"]
+            - funnel_summary["snippet_pool_evidence_coverage"]
+        ),
+        "packing_selection_gap": (
+            funnel_summary["snippet_pool_evidence_coverage"]
+            - funnel_summary[f"packed_top{packing_top_k}_evidence_coverage"]
+        ),
+        "packed_gain_vs_top3": (
+            funnel_summary[f"packed_top{packing_top_k}_evidence_coverage"]
+            - funnel_summary["reranked_top3_evidence_coverage"]
+        ),
         "mean_candidate_hits": _mean(candidate_hit_counts),
         "mean_expanded_hits": _mean(expanded_hit_counts),
         "structural_changed_samples": structural_changed,
@@ -282,6 +317,8 @@ def evaluate_retrieval_ab(
         "candidate_max_per_source": int(candidate_max_per_source),
         "query_expansion": bool(query_expansion),
         "structural_expansion": bool(structural_expansion),
+        "packing_top_k": int(packing_top_k),
+        "packing_snippet_chars": int(packing_snippet_chars),
         "funnel": funnel_summary,
         "baseline": baseline_summary,
         "reranked": reranked_summary,

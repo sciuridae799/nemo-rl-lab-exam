@@ -56,7 +56,7 @@ data:
   input_key: query
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
-  # R3d：只测语料→候选→结构扩展→Top-3 检索漏斗，不初始化模型。
+  # R3e：离线筛查句子级压缩与同正文预算多证据打包，不初始化模型。
   retrieval_diagnostic: true
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
@@ -85,6 +85,9 @@ env:
       query_expansion: true
       # 在 BM25 候选后补同源相邻块及同目录试卷/答案兄弟文档。
       structural_expansion: true
+      # 仅用于离线筛查；8×140 正文字符不超过当前 1200 字符预算。
+      packing_top_k: 8
+      packing_snippet_chars: 140
       expand_ascii_tokens: false
       max_searches: 2
       max_result_chars: 1200

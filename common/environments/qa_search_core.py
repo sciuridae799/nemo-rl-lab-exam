@@ -251,6 +251,64 @@ def _best_answer_sentence_score(question: str, text: str) -> float:
     return best
 
 
+def _snippet_relevance_score(question: str, text: str) -> float:
+    """给候选片段中的短窗口打分，不依赖 gold 或题目特例。"""
+    bridge = _cloze_bridge_signal(question, text)
+    return (
+        0.45 * _term_coverage(question, text)
+        + 0.30 * _best_answer_sentence_score(question, text)
+        + 0.75 * max(0.0, bridge)
+        + 0.15 * float(bool(_ANSWER_CUE.search(text)))
+        - 0.80 * question_copy_score(question, text)
+        - 0.20 * max(0.0, -bridge)
+    )
+
+
+def _snippet_windows(text: str, limit: int) -> list[str]:
+    """生成句子边界与重叠定长窗口，兼顾长表格和普通段落。"""
+    stripped = str(text).strip()
+    if len(stripped) <= limit:
+        return [stripped] if stripped else []
+
+    spans = [
+        span.strip()
+        for span in re.split(r"(?<=[。！？!?；;])|\n+", stripped)
+        if span.strip()
+    ]
+    windows = [span for span in spans if len(span) <= limit]
+    step = max(1, limit // 2)
+    windows.extend(
+        stripped[start : start + limit].strip()
+        for start in range(0, len(stripped), step)
+        if stripped[start : start + limit].strip()
+    )
+    return windows
+
+
+def extract_answerable_snippets(
+    question: str,
+    hits: list[SearchHit],
+    *,
+    max_chars: int = 140,
+) -> list[SearchHit]:
+    """把每个候选块压缩成一个问题相关短片段，以相同正文预算容纳更多来源。"""
+    limit = max(60, int(max_chars))
+    snippets: list[SearchHit] = []
+    for hit in hits:
+        windows = _snippet_windows(hit.text, limit)
+        if not windows:
+            continue
+        best_position = max(
+            range(len(windows)),
+            key=lambda position: (
+                _snippet_relevance_score(question, windows[position]),
+                -position,
+            ),
+        )
+        snippets.append(SearchHit(hit.source, windows[best_position], hit.score))
+    return snippets
+
+
 def _content_similarity(left: str, right: str) -> float:
     left_terms = set(_terms(left))
     right_terms = set(_terms(right))

@@ -58,6 +58,7 @@ def test_retrieval_ab_reports_answer_evidence_gain(tmp_path):
     assert report["funnel"]["corpus_evidence_coverage"] == pytest.approx(1.0)
     assert report["funnel"]["candidate_pool_evidence_coverage"] == pytest.approx(1.0)
     assert report["funnel"]["reranked_top3_evidence_coverage"] == pytest.approx(1.0)
+    assert report["funnel"]["packed_top8_evidence_coverage"] == pytest.approx(1.0)
 
 
 def test_retrieval_ab_can_expand_sibling_answer_document(tmp_path):
