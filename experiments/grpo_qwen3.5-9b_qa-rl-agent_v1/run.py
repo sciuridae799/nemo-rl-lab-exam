@@ -62,8 +62,20 @@ class QAAgentDataset(Dataset):
         output_key: str,
         system_prompt: str,
         chat_template_kwargs: dict[str, Any] | None = None,
+        balance_open_types: bool = False,
     ):
         self.rows = _read_jsonl(path)
+        if balance_open_types:
+            open_rows = [
+                row
+                for row in self.rows
+                if qa_type_from_text(str(row[input_key])) in {"fill", "short"}
+            ]
+            self.rows.extend(open_rows)
+            print(
+                f"训练集开放题加权：原始 {len(self.rows) - len(open_rows)} 条，"
+                f"新增 {len(open_rows)} 条，最终 {len(self.rows)} 条"
+            )
         self.tokenizer = tokenizer
         self.input_key = input_key
         self.output_key = output_key
@@ -152,7 +164,9 @@ def main():
         dict(config.policy["tokenizer"].get("chat_template_kwargs") or {}),
     )
     train_dataset = QAAgentDataset(
-        os.path.join(data_dir, "train.jsonl"), *dataset_args
+        os.path.join(data_dir, "train.jsonl"),
+        *dataset_args,
+        balance_open_types=True,
     )
     val_dataset = QAAgentDataset(os.path.join(data_dir, "val.jsonl"), *dataset_args)
     print(f"训练集 {len(train_dataset)} 条，验证集 {len(val_dataset)} 条")
