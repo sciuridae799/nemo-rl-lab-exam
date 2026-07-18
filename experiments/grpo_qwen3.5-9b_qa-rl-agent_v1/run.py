@@ -9,10 +9,13 @@ import os
 import pprint
 import sys
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
+import torch
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
@@ -27,9 +30,11 @@ from nemo_rl.algorithms.grpo import (
     validate,
 )
 from nemo_rl.algorithms.utils import get_tokenizer, set_seed
+from nemo_rl.data.collate_fn import rl_collate_fn
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType
 from nemo_rl.distributed.virtual_cluster import init_ray
 from nemo_rl.models.generation import configure_generation_config
+from nemo_rl.utils.checkpoint import CheckpointManager
 from nemo_rl.utils.config import (
     load_config,
     parse_hydra_overrides,
@@ -178,6 +183,68 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
     print("QA检索A/B：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
+def _seed_grpo_weights_only(
+    config: MasterConfig,
+    train_dataset: QAAgentDataset,
+    source_root: str,
+    source_step: int,
+) -> Path:
+    """把跨算法 checkpoint 只作为 GRPO step 0 权重，重建全部训练状态。"""
+    if bool(config.data.get("use_multiple_dataloader", False)):
+        raise RuntimeError("weights-only 播种暂不支持 multiple dataloader")
+    if bool(config.grpo.get("use_dynamic_sampling", False)):
+        raise RuntimeError("weights-only 播种探针要求关闭 dynamic sampling")
+    if int(config.grpo.get("batch_multiplier", 1)) != 1:
+        raise RuntimeError("weights-only 播种要求 batch_multiplier=1")
+
+    target_step = seed_checkpoint_step(
+        source_root,
+        str(config.checkpointing["checkpoint_dir"]),
+        source_step,
+        target_step=0,
+    )
+    training_info_path = target_step / "training_info.json"
+    training_info_path.unlink()
+    training_info_path.write_text(
+        json.dumps(
+            {
+                "consumed_samples": 0,
+                "current_step": 0,
+                "current_epoch": 0,
+                "total_steps": 0,
+                "total_valid_tokens": 0,
+                "val_reward": -99999999.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fresh_loader = StatefulDataLoader(
+        train_dataset,
+        batch_size=int(config.grpo["num_prompts_per_step"]),
+        shuffle=bool(config.data["shuffle"]),
+        collate_fn=rl_collate_fn,
+        drop_last=True,
+        num_workers=int(config.data["num_workers"]),
+    )
+    dataloader_path = target_step / "train_dataloader.pt"
+    dataloader_path.unlink()
+    torch.save(fresh_loader.state_dict(), dataloader_path)
+
+    original_get_resume_paths = CheckpointManager.get_resume_paths
+
+    def weights_only(last_checkpoint_path):
+        weights_path, _ = original_get_resume_paths(last_checkpoint_path)
+        return weights_path, None
+
+    CheckpointManager.get_resume_paths = staticmethod(weights_only)
+    print(
+        f"GRPO weights-only 播种完成：{source_root}/step_{source_step} -> "
+        f"{target_step}；GRPO state/dataloader 已重置，optimizer/scheduler 强制新建"
+    )
+    return target_step
+
+
 def main():
     register_omegaconf_resolvers()
     args, overrides = parse_args()
@@ -191,7 +258,15 @@ def main():
     resume_source = str(config.data.get("resume_checkpoint_dir") or "").strip()
     resume_step = int(config.data.get("resume_checkpoint_step", 0))
     resume_validation_only = bool(config.data.get("resume_validation_only", False))
-    if resume_source:
+    resume_weights_only = bool(config.data.get("resume_weights_only", False))
+    weights_only_validation_only = bool(
+        config.data.get("weights_only_validation_only", False)
+    )
+    if resume_validation_only and resume_weights_only:
+        raise SystemExit("resume_validation_only 与 resume_weights_only 不能同时启用")
+    if weights_only_validation_only and not resume_weights_only:
+        raise SystemExit("weights_only_validation_only 需要 resume_weights_only=true")
+    if resume_source and not resume_weights_only:
         seeded = seed_checkpoint_step(
             resume_source,
             str(config.checkpointing["checkpoint_dir"]),
@@ -245,6 +320,14 @@ def main():
     )
     print(f"训练集 {len(train_dataset)} 条，验证集 {len(val_dataset)} 条")
 
+    if resume_source and resume_weights_only:
+        _seed_grpo_weights_only(
+            config,
+            train_dataset,
+            resume_source,
+            resume_step,
+        )
+
     env_cfg = dict(config.env[TASK_NAME]["cfg"])
     env = QASearchEnv.options(num_gpus=0).remote(cfg=env_cfg)
     task_to_env = {TASK_NAME: env}
@@ -263,15 +346,17 @@ def main():
         master_config,
     ) = setup(config, tokenizer, train_dataset, val_dataset)
 
-    if resume_validation_only:
+    if resume_validation_only or weights_only_validation_only:
         current_step = int(grpo_state["current_step"])
-        if current_step != resume_step:
+        expected_step = 0 if weights_only_validation_only else resume_step
+        if current_step != expected_step:
             raise RuntimeError(
-                f"断点 step 校验失败：期望 {resume_step}，实际 {current_step}"
+                f"断点 step 校验失败：期望 {expected_step}，实际 {current_step}"
             )
         if policy_generation is None:
             raise RuntimeError("validation-only 探针需要独立生成后端")
-        print(f"开始验证恢复后的 policy：step={current_step}")
+        mode = "weights-only" if weights_only_validation_only else "resume"
+        print(f"开始验证 {mode} policy：step={current_step}")
         refit_policy_generation(
             policy,
             policy_generation,
@@ -293,7 +378,7 @@ def main():
             current_step,
             prefix="timing/validation",
         )
-        print(f"恢复验证指标：{dict(sorted(val_metrics.items()))}")
+        print(f"{mode} 验证指标：{dict(sorted(val_metrics.items()))}")
         return
 
     grpo_train(

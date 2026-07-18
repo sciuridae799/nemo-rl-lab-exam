@@ -6,6 +6,9 @@ from pathlib import Path
 import pytest
 
 from common.utils.checkpoint_seed import seed_checkpoint_step
+from nemo_rl_lab.config_resolve import resolve
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _make_checkpoint(root: Path, step: int = 30) -> Path:
@@ -62,3 +65,19 @@ def test_seed_checkpoint_step_can_renumber_copy_without_touching_source(tmp_path
     assert target_step == target / "step_0"
     assert (target_step / "policy" / "weights").is_dir()
     assert source_step == source / "step_30"
+
+
+def test_qa_grpo_coldstart_probe_is_weights_only_validation():
+    config = resolve(
+        REPO_ROOT
+        / "experiments"
+        / "grpo_qwen3.5-9b_qa-rl-agent_v1"
+        / "config.yaml"
+    )
+
+    assert config["data"]["resume_weights_only"] is True
+    assert config["data"]["weights_only_validation_only"] is True
+    assert config["data"]["retrieval_diagnostic"] is False
+    assert config["data"]["resume_checkpoint_step"] == 8
+    assert config["grpo"]["max_num_steps"] == 5
+    assert config["env"]["qa_search"]["cfg"]["evidence_reward_scale"] == 0.0
