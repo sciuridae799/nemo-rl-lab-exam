@@ -193,29 +193,6 @@ def _best_answer_sentence_score(question: str, text: str) -> float:
     return best
 
 
-def _answerability_strength(question: str, hit: SearchHit) -> float:
-    bridge = _cloze_bridge_signal(question, hit.text)
-    source = hit.source + "\n" + hit.text
-    source_answer_cue = bool(
-        re.search(
-            r"参考答案|答案|answer|solution|manual|training",
-            hit.source,
-            re.IGNORECASE,
-        )
-    )
-    source_exam_cue = bool(
-        re.search(r"试卷|试题|题库|exam|quiz", hit.source, re.IGNORECASE)
-    )
-    return (
-        _best_answer_sentence_score(question, hit.text)
-        + 0.8 * max(0.0, bridge)
-        + 0.12 * float(source_answer_cue)
-        - 0.25 * float(source_exam_cue)
-        - 0.8 * question_copy_score(question, hit.text)
-        + 0.05 * float(_ANSWER_CUE.search(source) is not None)
-    )
-
-
 def _content_similarity(left: str, right: str) -> float:
     left_terms = set(_terms(left))
     right_terms = set(_terms(right))
@@ -307,11 +284,9 @@ def rerank_answerable_hits(
         baseline_key = (baseline.source, baseline.text)
         selected_keys = {(hit.source, hit.text) for hit in selected}
         best_candidate = selected[0]
-        can_promote = (
-            _cloze_bridge_signal(question, best_candidate.text) > 0.5
-            or _answerability_strength(question, best_candidate)
-            >= _answerability_strength(question, baseline) + 0.25
-        )
+        # 没有明确填空左右文桥接证据时，保留原始 BM25 第一候选作为负回退；
+        # 这样一个启发式重排不会把已有的可用证据替换成泛泛而谈的段落。
+        can_promote = _cloze_bridge_signal(question, best_candidate.text) > 0.5
         if baseline_key not in selected_keys and not can_promote:
             selected = [baseline] + [
                 hit
@@ -659,6 +634,7 @@ class QASearchRunner:
         *,
         top_k: int = 3,
         candidate_k: int = 20,
+        candidate_max_per_source: int = 4,
         answerability_rerank: bool = False,
         query_expansion: bool = False,
         max_searches: int = 2,
@@ -668,6 +644,7 @@ class QASearchRunner:
         self.reward_fn = reward_fn
         self.top_k = max(1, int(top_k))
         self.candidate_k = max(self.top_k, int(candidate_k))
+        self.candidate_max_per_source = max(1, int(candidate_max_per_source))
         self.answerability_rerank = bool(answerability_rerank)
         self.query_expansion = bool(query_expansion)
         self.max_searches = max(1, int(max_searches))
@@ -795,6 +772,7 @@ class QASearchRunner:
                 candidate_hits = self.index.search_union(
                     queries,
                     candidate_k=self.candidate_k,
+                    max_per_source=self.candidate_max_per_source,
                 )
                 hits = rerank_answerable_hits(
                     question,

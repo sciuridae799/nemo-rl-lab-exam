@@ -48,6 +48,7 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             reward_fn,
             top_k=int(cfg.get("top_k", 3)),
             candidate_k=int(cfg.get("candidate_k", 20)),
+            candidate_max_per_source=int(cfg.get("candidate_max_per_source", 4)),
             answerability_rerank=bool(cfg.get("answerability_rerank", False)),
             query_expansion=bool(cfg.get("query_expansion", False)),
             max_searches=int(cfg.get("max_searches", 2)),

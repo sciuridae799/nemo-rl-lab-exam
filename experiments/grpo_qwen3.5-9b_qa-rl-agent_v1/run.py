@@ -144,6 +144,7 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
         seed=int(data_cfg.get("retrieval_diagnostic_seed", config.grpo["seed"])),
         top_k=int(env_cfg.get("top_k", 3)),
         candidate_k=int(env_cfg.get("candidate_k", 20)),
+        candidate_max_per_source=int(env_cfg.get("candidate_max_per_source", 4)),
         query_expansion=bool(env_cfg.get("query_expansion", False)),
     )
     print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")

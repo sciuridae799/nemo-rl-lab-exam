@@ -74,7 +74,8 @@ env:
       chunk_chars: 480
       top_k: 3
       # 仅对填空/简答从更多 BM25 候选中重排，最终回灌条数不变。
-      candidate_k: 20
+      candidate_k: 80
+      candidate_max_per_source: 4
       answerability_rerank: true
       # D3：对题干、英文/数字锚点和填空左右文分别取候选，再合并重排。
       query_expansion: true

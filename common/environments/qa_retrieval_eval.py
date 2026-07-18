@@ -79,6 +79,7 @@ def evaluate_retrieval_ab(
     seed: int = 42,
     top_k: int = 3,
     candidate_k: int = 20,
+    candidate_max_per_source: int = 4,
     query_expansion: bool = False,
 ) -> dict[str, Any]:
     """在训练集开放题上比较原始 BM25 与可回答性重排。"""
@@ -115,6 +116,7 @@ def evaluate_retrieval_ab(
         candidate_hits = index.search_union(
             candidate_queries,
             candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
         )
         reranked_hits = rerank_answerable_hits(
             question,
@@ -153,6 +155,7 @@ def evaluate_retrieval_ab(
         "seed": int(seed),
         "top_k": int(top_k),
         "candidate_k": int(candidate_k),
+        "candidate_max_per_source": int(candidate_max_per_source),
         "query_expansion": bool(query_expansion),
         "baseline": baseline_summary,
         "reranked": reranked_summary,
