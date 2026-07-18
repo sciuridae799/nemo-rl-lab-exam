@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import math
 import re
 import unicodedata
@@ -192,18 +193,29 @@ class LocalMarkdownIndex:
                 )
                 scores[doc_id] += query_tf * idf * tf * (self.k1 + 1.0) / denominator
 
-        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
-        hits: list[SearchHit] = []
-        per_source: Counter[str] = Counter()
-        for doc_id, score in ranked:
-            chunk = self.chunks[doc_id]
-            if per_source[chunk.source] >= max_per_source:
-                continue
-            hits.append(SearchHit(chunk.source, chunk.text, score))
-            per_source[chunk.source] += 1
-            if len(hits) >= max(1, int(top_k)):
-                break
-        return hits
+        # 每个来源只保留有限候选，避免对近百万命中片段做完整排序。
+        source_heaps: dict[str, list[tuple[float, int, int]]] = defaultdict(list)
+        for doc_id, score in scores.items():
+            source = self.chunks[doc_id].source
+            item = (score, -doc_id, doc_id)
+            heap = source_heaps[source]
+            if len(heap) < max_per_source:
+                heapq.heappush(heap, item)
+            elif item > heap[0]:
+                heapq.heapreplace(heap, item)
+
+        candidates = [item for heap in source_heaps.values() for item in heap]
+        selected = heapq.nlargest(
+            max(1, int(top_k)), candidates, key=lambda item: (item[0], item[1])
+        )
+        return [
+            SearchHit(
+                self.chunks[doc_id].source,
+                self.chunks[doc_id].text,
+                score,
+            )
+            for score, _, doc_id in selected
+        ]
 
 
 def _last_assistant_text(message_log: list[dict[str, Any]]) -> str:
