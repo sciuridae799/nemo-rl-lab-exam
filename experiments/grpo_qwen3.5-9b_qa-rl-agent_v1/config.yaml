@@ -29,18 +29,18 @@ policy:
     scheduler:
       lr_decay_style: "constant"
       lr_warmup_iters: 2
-      lr_decay_iters: 30
+      lr_decay_iters: 4
 
 grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # 30 step 观察稳定趋势；平台侧按验证曲线执行早停。
-  max_num_steps: 30
-  val_period: 5
+  # 只验证题型、零方差组和 judge 链路，不用于最终指标。
+  max_num_steps: 4
+  val_period: 4
   val_at_start: true
   val_at_end: true
-  max_val_samples: 128
+  max_val_samples: 32
   val_batch_size: 32
   # Colocated vLLM 连续补采样会在反复唤醒时累积显存，单卡关闭。
   use_dynamic_sampling: false

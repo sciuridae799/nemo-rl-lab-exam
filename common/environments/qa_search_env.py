@@ -133,4 +133,6 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
                     judge_stats["fallback"] / requests if requests else 0.0
                 ),
             })
+        stage = "train" if metrics["qa_multi_sample_group_count"] else "validation"
+        print(f"QA诊断[{stage}]：{dict(sorted(metrics.items()))}")
         return batch, metrics
