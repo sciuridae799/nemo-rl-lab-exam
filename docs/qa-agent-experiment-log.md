@@ -76,12 +76,14 @@
 | 多轮检索结果容易造成序列截断 | `run_multi_turn_rollout` 会在超过总长度时标记 truncated | 限制检索条数与字符数，监控 `truncation_rate`，不用 `</think>` 截断最终答案 |
 | 只有一个并发作业 | 控制台配额 `0/1` | 不并行扫参；运行中采用低频定时检查 |
 | `uv sync` 下载依赖较慢，后续检查都在等待安装锁 | 三个 `uv run` 同时无输出，进程状态显示均等待同一安装 | 取消重复等待，只保留一次安装；先用系统现有 `pytest` 和 `py_compile` 验证纯 Python 核心 |
+| 浏览器能访问平台，但 CLI TLS 握手被提前断开 | `curl`、Python 和 OpenSSL 均在 `172.19.8.8:443` 收到 EOF | EasyConnect UI 显示“会话已过期”；待用户确认后重连 VPN，再复测 CLI |
 
 ## 5. 实施记录
 
 ### 2026-07-18：本地实现 v1
 
 - 将官方考试仓库克隆到当前目录 `nemo-rl-lab-exam/`。
+- 创建个人 Fork：`https://github.com/sciuridae799/nemo-rl-lab-exam`；官方远端保留为 `upstream`。
 - 新增纯 Python 检索与状态机：`common/environments/qa_search_core.py`。
 - 新增 NeMo-RL Ray 包装：`common/environments/qa_search_env.py`。
 - 新增实验目录：`experiments/grpo_qwen3.5-9b_qa-rl-agent_v1/`。
@@ -93,6 +95,9 @@
   - Ruff 通过；
   - `lab validate grpo_qwen3.5-9b_qa-rl-agent_v1` 通过；
   - 解析后的关键配置已核对：H200、Base 模型、batch `2×8=16`、3 轮、总序列 4096。
+- Git 节点：
+  - `d992a5b`：实现 QA 多轮检索实验；
+  - `467f648`：切换为可回滚的 2 步冒烟配置。
 
 ## 6. Run 记录模板
 
@@ -117,7 +122,7 @@
 ### Run S0：多轮链路冒烟
 
 - 时间：待提交。
-- Git commit：待提交。
+- Git commit：`467f648`。
 - 作业 ID：待提交。
 - 假设：数据与文档挂载可读；索引能构建；模型至少能产生部分合法搜索或最终答案轨迹。
 - 与正式 v1 的差异：`1×8` batch、2 个训练 step、16 条验证、关闭简答裁判。
