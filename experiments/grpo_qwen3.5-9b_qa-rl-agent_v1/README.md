@@ -26,4 +26,4 @@ lab validate grpo_qwen3.5-9b_qa-rl-agent_v1
 lab submit grpo_qwen3.5-9b_qa-rl-agent_v1
 ```
 
-真实 run、指标与困难统一记录在 `docs/qa-agent-experiment-log.md`。
+真实 run、截图与复盘统一在仓库外维护，不随训练代码打包。
