@@ -29,16 +29,16 @@ policy:
     scheduler:
       lr_decay_style: "constant"
       lr_warmup_iters: 2
-      # weights-only 初始化后使用全新的五步调度器。
-      lr_decay_iters: 5
+      # 行为门通过后使用全新的三步调度器。
+      lr_decay_iters: 3
 
 grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # R4c：SFT 后只跑五步，用真实行为验证正轨迹是否降低开放题全零率。
-  max_num_steps: 5
-  val_period: 5
+  # R5c：先做 step-0 行为门；通过后最多只训练三步。
+  max_num_steps: 3
+  val_period: 3
   val_at_start: true
   val_at_end: true
   max_val_samples: 128
@@ -60,12 +60,12 @@ data:
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
   open_loss_multiplier: 1.0
-  resume_checkpoint_dir: /shared/outputs/pengyuyang/sft_qwen3.5-9b_qa-agent-coldstart_v1/sft_qwen3.5-9b_qa-agent-coldstart_v1-pengyuyang-20260718-223810
-  resume_checkpoint_step: 8
+  resume_checkpoint_dir: /shared/outputs/pengyuyang/sft_qwen3.5-9b_qa-agent-coldstart_v1/sft_qwen3.5-9b_qa-agent-coldstart_v1-pengyuyang-20260718-233107
+  resume_checkpoint_step: 4
   resume_validation_only: false
   resume_weights_only: true
-  # step-0 行为门已通过；当前允许执行预注册的五步短跑。
-  weights_only_validation_only: false
+  # 先验证完整证据、最终答案监督是否真正改变开放题行为。
+  weights_only_validation_only: true
   system_prompt: |-
     你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
     检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。

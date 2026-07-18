@@ -67,7 +67,7 @@ def test_seed_checkpoint_step_can_renumber_copy_without_touching_source(tmp_path
     assert source_step == source / "step_30"
 
 
-def test_qa_grpo_coldstart_run_is_bounded_weights_only_training():
+def test_qa_grpo_coldstart_probe_is_weights_only_validation():
     config = resolve(
         REPO_ROOT
         / "experiments"
@@ -76,8 +76,10 @@ def test_qa_grpo_coldstart_run_is_bounded_weights_only_training():
     )
 
     assert config["data"]["resume_weights_only"] is True
-    assert config["data"]["weights_only_validation_only"] is False
+    assert config["data"]["weights_only_validation_only"] is True
     assert config["data"]["retrieval_diagnostic"] is False
-    assert config["data"]["resume_checkpoint_step"] == 8
-    assert config["grpo"]["max_num_steps"] == 5
+    assert config["data"]["resume_checkpoint_step"] == 4
+    assert config["grpo"]["max_num_steps"] == 3
+    assert config["grpo"]["val_period"] == 3
+    assert config["policy"]["megatron_cfg"]["scheduler"]["lr_decay_iters"] == 3
     assert config["env"]["qa_search"]["cfg"]["evidence_reward_scale"] == 0.0
