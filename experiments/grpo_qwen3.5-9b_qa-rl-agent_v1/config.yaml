@@ -33,9 +33,8 @@ grpo:
   val_at_end: true
   max_val_samples: 64
   val_batch_size: 32
-  # 丢弃组内奖励完全相同、没有梯度信号的 prompt。
-  use_dynamic_sampling: true
-  dynamic_sampling_max_gen_batches: 10
+  # Colocated vLLM 连续补采样会在反复唤醒时累积显存，单卡关闭。
+  use_dynamic_sampling: false
 
 loss_fn:
   reference_policy_kl_penalty: 0.01
