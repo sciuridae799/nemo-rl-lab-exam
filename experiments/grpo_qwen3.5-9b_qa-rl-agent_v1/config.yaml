@@ -29,14 +29,15 @@ policy:
     scheduler:
       lr_decay_style: "constant"
       lr_warmup_iters: 2
-      lr_decay_iters: 35
+      # validation-only 必须与 F4 checkpoint 的调度器状态完全一致。
+      lr_decay_iters: 30
 
 grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # R3a 先只验证 F4 step 30 能否从独立 run 安全恢复；通过后最多续训 5 step。
-  max_num_steps: 35
+  # R3a 只验证 F4 step 30 能否从独立 run 安全恢复，不执行新训练 step。
+  max_num_steps: 30
   val_period: 5
   val_at_start: true
   val_at_end: true
