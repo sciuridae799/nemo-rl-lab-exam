@@ -155,6 +155,7 @@ def test_linear_reranker_cross_validation_holds_out_whole_questions():
         negative = [0.0] * 11
         groups.append({
             "type": "fill" if index % 2 == 0 else "short",
+            "group_key": f"question-{index // 4}",
             "expected": "[fill] 数据总线",
             "hits": [
                 SearchHit(f"answer-{index}.md", "数据总线", 2.0),
@@ -168,5 +169,7 @@ def test_linear_reranker_cross_validation_holds_out_whole_questions():
     report = _linear_reranker_cross_validation(groups, top_k=1, folds=4)
 
     assert report["sample_count"] == 8
+    assert report["unique_question_count"] == 4
+    assert report["duplicate_question_rows"] == 4
     assert report["heldout_evidence_coverage"] == 1.0
     assert report["by_type"]["fill"]["count"] == 4

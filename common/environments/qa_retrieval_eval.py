@@ -245,6 +245,8 @@ def _linear_reranker_cross_validation(
     if not groups:
         return {
             "sample_count": 0,
+            "unique_question_count": 0,
+            "duplicate_question_rows": 0,
             "folds": 0,
             "top_k": int(top_k),
             "heldout_evidence_coverage": 0.0,
@@ -256,14 +258,26 @@ def _linear_reranker_cross_validation(
             "positive_candidate_rate": 0.0,
             "model": None,
         }
-    fold_count = min(max(2, int(folds)), len(groups))
+    group_identities = [
+        (str(group["type"]), str(group.get("group_key", f"row-{index}")))
+        for index, group in enumerate(groups)
+    ]
+    unique_identities = list(dict.fromkeys(group_identities))
+    fold_count = (
+        min(max(2, int(folds)), len(unique_identities))
+        if len(unique_identities) > 1
+        else 1
+    )
     fold_assignments: dict[int, int] = {}
     by_type_indices: dict[str, list[int]] = defaultdict(list)
     for index, group in enumerate(groups):
         by_type_indices[str(group["type"])].append(index)
-    for indices in by_type_indices.values():
-        for rank, index in enumerate(indices):
-            fold_assignments[index] = rank % fold_count
+    identity_folds = {
+        identity: rank % fold_count
+        for rank, identity in enumerate(unique_identities)
+    }
+    for index, identity in enumerate(group_identities):
+        fold_assignments[index] = identity_folds[identity]
 
     heldout_rows: list[dict[str, Any]] = []
     fold_coverages: list[float] = []
@@ -307,6 +321,8 @@ def _linear_reranker_cross_validation(
     candidate_count = sum(len(group["labels"]) for group in groups)
     return {
         "sample_count": len(heldout_rows),
+        "unique_question_count": len(unique_identities),
+        "duplicate_question_rows": len(groups) - len(unique_identities),
         "folds": fold_count,
         "top_k": int(top_k),
         "heldout_evidence_coverage": heldout_coverage,
@@ -461,6 +477,7 @@ def evaluate_retrieval_ab(
         linear_groups.append({
             "row_index": row_index,
             "type": question_type,
+            "group_key": compact_text(question),
             "expected": expected,
             "hits": snippet_hits,
             "features": snippet_features,
