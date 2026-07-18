@@ -28,7 +28,7 @@ lab submit grpo_qwen3.5-9b_qa-rl-agent_v1
 
 真实 run、截图与复盘统一在仓库外维护，不随训练代码打包。
 
-当前 R5 行为门从完整证据、最终答案监督的 SFT step 4 只加载权重，重建
-GRPO optimizer/scheduler，并只运行 128 题 step-0 validation。开放题至少达到
-`3/19` 正分、至少一条填空正分，且封闭题与格式保护门通过后，才关闭
-validation-only 运行最多 3-step GRPO。
+R5 的完整证据、最终答案 SFT 行为门已失败，不再续训。当前从最佳 F4 step 30
+只加载权重，将 generation temperature 从 `0.7` 单独降到 `0.2`，运行 128 题
+validation-only。该消融只检验较确定的采样能否减少封闭题方差；不读取验证答案，
+也不执行 optimizer step。
