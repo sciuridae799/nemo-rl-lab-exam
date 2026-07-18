@@ -57,7 +57,7 @@ data:
   data_dir: /data/datasets/qa_rl
   # D2 只建立索引并比较检索，不初始化模型或训练；通过门槛后关闭。
   retrieval_diagnostic: true
-  retrieval_diagnostic_max_per_type: 64
+  retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
   system_prompt: |-
     你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
