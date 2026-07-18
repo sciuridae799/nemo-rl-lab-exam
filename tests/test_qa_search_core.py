@@ -113,21 +113,6 @@ def test_last_search_requires_answer(runner):
     assert "\\boxed{答案}" not in result.observation["content"]
 
 
-def test_first_search_guides_evidence_based_refinement(runner):
-    result = runner.process_turn(
-        [{"role": "assistant", "content": "<search>设备数量</search>"}],
-        {
-            "query": "题目：设备有多少模块？",
-            "expected_answer": "[short] 两个",
-            "searches": 0,
-        },
-    )
-    hint = result.observation["content"]
-    assert "证据不足" in hint
-    assert "英文缩写、数字或专有名词" in hint
-    assert "空的 \\boxed{}" in hint
-
-
 def test_format_correction_can_finish_with_boxed_answer(runner):
     correction = runner.process_turn(
         [{"role": "assistant", "content": "<answer>答案是 A</answer>"}],

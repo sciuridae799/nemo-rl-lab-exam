@@ -70,8 +70,7 @@ env:
       chunk_chars: 480
       top_k: 3
       max_searches: 2
-      # 二次检索增加上下文，限制单轮回灌以避免 micro-batch 2 训练 OOM。
-      max_result_chars: 900
+      max_result_chars: 1200
       k1: 1.5
       b: 0.75
       use_judge: true
