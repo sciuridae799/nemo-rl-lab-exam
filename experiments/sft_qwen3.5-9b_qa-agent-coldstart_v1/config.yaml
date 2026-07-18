@@ -1,4 +1,4 @@
-# R4：从 F4 权重做极短正工具轨迹 SFT；首轮只验证数据和 weights-only 加载。
+# R5：只用完整证据覆盖的开放题轨迹，验证证据到答案的短 SFT。
 defaults:
   - ../../configs/base/sft.yaml
   - ../../configs/models/qwen3.5-9b.yaml
@@ -42,14 +42,14 @@ policy:
     scheduler:
       lr_decay_style: "constant"
       lr_warmup_iters: 1
-      lr_decay_iters: 8
+      lr_decay_iters: 4
 
 sft:
-  # 下一训练候选只监督最终答案；当前 data_build_only 诊断不会初始化模型。
+  # 搜索协议已由 F4 学会；只让最终作答回合产生监督梯度。
   only_unmask_final: true
-  max_num_epochs: 2
-  max_num_steps: 8
-  val_period: 4
+  max_num_epochs: 1
+  max_num_steps: 4
+  val_period: 2
   val_batches: 2
   val_global_batch_size: 32
   val_micro_batch_size: 2
@@ -58,7 +58,7 @@ sft:
   seed: 42
 
 checkpointing:
-  save_period: 4
+  save_period: 2
   save_optimizer: false
   metric_name: "val:val_loss"
   higher_is_better: false
@@ -80,14 +80,14 @@ data:
     花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
   seed: 42
   validation_fraction: 0.10
-  # R5a 数据门：扫描全部唯一开放题候选，先测完整证据覆盖数量。
-  target_open: 1000
-  target_closed: 0
+  # 只保留检索 observation 覆盖全部 gold 要点的开放题；封闭题用于能力回放。
+  target_open: 128
+  target_closed: 96
   max_open_scan_per_type: 700
-  max_closed_scan_per_type: 0
-  min_open_trajectories: 0
-  min_open_evidence_coverage: 0.0
-  data_build_only: true
+  max_closed_scan_per_type: 40
+  min_open_trajectories: 80
+  min_open_evidence_coverage: 1.0
+  data_build_only: false
   weights_load_probe_only: false
   reuse_coldstart_data_dir: ""
   resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400

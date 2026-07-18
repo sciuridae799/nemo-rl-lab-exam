@@ -138,8 +138,15 @@ def test_coldstart_sft_config_has_remote_master_config_fields():
     )
 
     assert config["sft"]["only_unmask_final"] is True
-    assert config["data"]["data_build_only"] is True
-    assert config["data"]["min_open_evidence_coverage"] == 0.0
+    assert config["sft"]["max_num_epochs"] == 1
+    assert config["sft"]["max_num_steps"] == 4
+    assert config["sft"]["val_period"] == 2
+    assert config["checkpointing"]["save_period"] == 2
+    assert config["data"]["data_build_only"] is False
+    assert config["data"]["target_open"] == 128
+    assert config["data"]["target_closed"] == 96
+    assert config["data"]["min_open_trajectories"] == 80
+    assert config["data"]["min_open_evidence_coverage"] == 1.0
     assert config["policy"]["tokenizer"]["chat_template"] is None
     assert config["policy"]["generation"]["colocated"]["enabled"] is False
     assert set(config["policy"]["generation"]) >= {
