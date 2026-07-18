@@ -19,7 +19,13 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
+from nemo_rl.algorithms.grpo import (
+    MasterConfig,
+    grpo_train,
+    refit_policy_generation,
+    setup,
+    validate,
+)
 from nemo_rl.algorithms.utils import get_tokenizer, set_seed
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType
 from nemo_rl.distributed.virtual_cluster import init_ray
@@ -39,6 +45,7 @@ from common.environments.qa_search_core import (
     qa_type_from_text,
 )
 from common.environments.qa_search_env import QASearchEnv
+from common.utils.checkpoint_seed import seed_checkpoint_step
 
 TASK_NAME = "qa_search"
 
@@ -177,6 +184,20 @@ def main():
     config = load_config(args.config)
     if overrides:
         config = parse_hydra_overrides(config, overrides)
+
+    resume_source = str(config.data.get("resume_checkpoint_dir") or "").strip()
+    resume_step = int(config.data.get("resume_checkpoint_step", 0))
+    resume_validation_only = bool(config.data.get("resume_validation_only", False))
+    if resume_source:
+        seeded = seed_checkpoint_step(
+            resume_source,
+            str(config.checkpointing["checkpoint_dir"]),
+            resume_step,
+        )
+        print(f"断点续训播种完成：{seeded}（历史目录保持只读）")
+    elif resume_validation_only:
+        raise SystemExit("resume_validation_only=true 时必须配置 resume_checkpoint_dir")
+
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))
     pprint.pprint(config)
 
@@ -238,6 +259,39 @@ def main():
         grpo_state,
         master_config,
     ) = setup(config, tokenizer, train_dataset, val_dataset)
+
+    if resume_validation_only:
+        current_step = int(grpo_state["current_step"])
+        if current_step != resume_step:
+            raise RuntimeError(
+                f"断点 step 校验失败：期望 {resume_step}，实际 {current_step}"
+            )
+        if policy_generation is None:
+            raise RuntimeError("validation-only 探针需要独立生成后端")
+        print(f"开始验证恢复后的 policy：step={current_step}")
+        refit_policy_generation(
+            policy,
+            policy_generation,
+            bool(config.policy["generation"]["colocated"]["enabled"]),
+        )
+        val_metrics, validation_timings = validate(
+            policy_generation,
+            val_dataloader,
+            tokenizer,
+            task_to_env,
+            step=current_step,
+            master_config=master_config,
+            logger=logger,
+        )
+        policy_generation.finish_generation()
+        logger.log_metrics(val_metrics, current_step, prefix="validation")
+        logger.log_metrics(
+            validation_timings,
+            current_step,
+            prefix="timing/validation",
+        )
+        print(f"恢复验证指标：{dict(sorted(val_metrics.items()))}")
+        return
 
     grpo_train(
         policy,
