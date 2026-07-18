@@ -10,7 +10,12 @@ from nemo_rl.data.interfaces import LLMMessageLogType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
 
-from common.environments.qa_search_core import LocalMarkdownIndex, QASearchRunner
+from common.environments.qa_search_core import (
+    LocalMarkdownIndex,
+    QASearchRunner,
+    qa_reward_diagnostics,
+    qa_type_from_text,
+)
 
 
 @ray.remote  # pragma: no cover
@@ -24,13 +29,18 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             b=float(cfg.get("b", 0.75)),
         )
         if bool(cfg.get("use_judge", True)):
-            from common.rewards.qa_judge_reward import qa_judge_reward_fn
+            from common.rewards.qa_judge_reward import (
+                get_judge_stats,
+                qa_judge_reward_fn,
+            )
 
             reward_fn = qa_judge_reward_fn
+            self._get_judge_stats = get_judge_stats
         else:
             from common.rewards.qa_reward import qa_rule_reward_fn
 
             reward_fn = qa_rule_reward_fn
+            self._get_judge_stats = None
 
         self.runner = QASearchRunner(
             index,
@@ -73,6 +83,7 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
         logs = batch.get("message_log", [])
         search_counts = []
         final_flags = []
+        question_types = []
         for log in logs:
             assistant_texts = [
                 str(message.get("content", ""))
@@ -81,6 +92,18 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             ]
             search_counts.append(sum("<search>" in text.lower() for text in assistant_texts))
             final_flags.append(any("\\boxed" in text for text in assistant_texts))
+            question_types.append(
+                qa_type_from_text(
+                    "\n".join(str(message.get("content", "")) for message in log)
+                )
+            )
+
+        reward_values = rewards.detach().cpu().tolist()
+        indices = batch["idx"]
+        if torch.is_tensor(indices):
+            prompt_indices = indices.detach().cpu().tolist()
+        else:
+            prompt_indices = list(indices)
 
         metrics = {
             "qa_mean_reward": rewards.mean().item() if len(rewards) else 0.0,
@@ -95,4 +118,19 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             "qa_avg_searches": sum(search_counts) / max(1, len(search_counts)),
             "qa_final_answer_rate": sum(final_flags) / max(1, len(final_flags)),
         }
+        metrics.update(
+            qa_reward_diagnostics(reward_values, prompt_indices, question_types)
+        )
+        if self._get_judge_stats is not None:
+            judge_stats = self._get_judge_stats(reset=True)
+            requests = judge_stats["requested"]
+            metrics.update({
+                "qa_judge_requests": float(requests),
+                "qa_judge_success_rate": (
+                    judge_stats["success"] / requests if requests else 0.0
+                ),
+                "qa_judge_fallback_rate": (
+                    judge_stats["fallback"] / requests if requests else 0.0
+                ),
+            })
         return batch, metrics

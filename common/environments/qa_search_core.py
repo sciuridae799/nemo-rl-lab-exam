@@ -19,6 +19,13 @@ _ASCII_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.+-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 _SEARCH = re.compile(r"<search>\s*(.*?)\s*</search>", re.IGNORECASE | re.DOTALL)
+_QA_TYPE_MARKERS = {
+    "single": "一道单选题",
+    "multiple": "一道多选题",
+    "bool": "一道判断题",
+    "fill": "一道填空题",
+    "short": "一道简答题",
+}
 
 
 @dataclass(frozen=True)
@@ -232,6 +239,57 @@ def _question_text(query: str) -> str:
 
 def _safe_label(text: str) -> str:
     return str(text).replace("<", "＜").replace(">", "＞")
+
+
+def qa_type_from_text(text: str) -> str:
+    """从项目固定题面前缀识别题型。"""
+    for name, marker in _QA_TYPE_MARKERS.items():
+        if marker in str(text):
+            return name
+    return "unknown"
+
+
+def qa_reward_diagnostics(
+    rewards: list[float],
+    prompt_indices: list[int],
+    question_types: list[str],
+) -> dict[str, float]:
+    """统计各题型奖励与多生成 prompt 的零方差比例。"""
+    if not (len(rewards) == len(prompt_indices) == len(question_types)):
+        raise ValueError("诊断输入长度不一致")
+
+    metrics: dict[str, float] = {}
+    for name in _QA_TYPE_MARKERS:
+        values = [
+            reward
+            for reward, question_type in zip(rewards, question_types, strict=False)
+            if question_type == name
+        ]
+        count = len(values)
+        metrics[f"qa_type_{name}_count"] = float(count)
+        metrics[f"qa_type_{name}_mean_reward"] = (
+            sum(values) / count if count else 0.0
+        )
+        metrics[f"qa_type_{name}_zero_rate"] = (
+            sum(value == 0.0 for value in values) / count if count else 0.0
+        )
+
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for prompt_idx, reward in zip(prompt_indices, rewards, strict=False):
+        grouped[int(prompt_idx)].append(float(reward))
+    multi_sample_groups = [values for values in grouped.values() if len(values) > 1]
+    zero_variance = sum(
+        max(values) - min(values) <= 1.0e-8 for values in multi_sample_groups
+    )
+    group_count = len(multi_sample_groups)
+    metrics["qa_multi_sample_group_count"] = float(group_count)
+    metrics["qa_zero_variance_group_rate"] = (
+        zero_variance / group_count if group_count else 0.0
+    )
+    metrics["qa_effective_group_rate"] = (
+        1.0 - metrics["qa_zero_variance_group_rate"] if group_count else 0.0
+    )
+    return metrics
 
 
 class QASearchRunner:

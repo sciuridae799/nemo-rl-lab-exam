@@ -31,6 +31,7 @@ import re
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 try:  # 作为包导入（被环境/训练脚本使用）
     from common.rewards import qa_reward
@@ -42,6 +43,9 @@ JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 JUDGE_API_KEY = os.environ.get("JUDGE_API_KEY", "EMPTY")
 JUDGE_CONCURRENCY = int(os.environ.get("JUDGE_CONCURRENCY", "16"))
 JUDGE_TIMEOUT = float(os.environ.get("JUDGE_TIMEOUT", "30"))
+
+_JUDGE_STATS = {"requested": 0, "success": 0, "fallback": 0}
+_JUDGE_STATS_LOCK = Lock()
 
 _JUDGE_SYS = (
     "你是严格、公正的阅卷老师。根据【参考要点】判断【学生作答】对题目的覆盖与正确程度，"
@@ -96,6 +100,22 @@ def _call_judge(prompt: str) -> float | None:
     return max(0.0, min(1.0, float(m.group(1))))
 
 
+def get_judge_stats(*, reset: bool = False) -> dict[str, int]:
+    """读取裁判调用统计；按 rollout 批次读取时可同时清零。"""
+    with _JUDGE_STATS_LOCK:
+        stats = dict(_JUDGE_STATS)
+        if reset:
+            _JUDGE_STATS.update(requested=0, success=0, fallback=0)
+    return stats
+
+
+def _record_judge_stats(*, requested: int, success: int, fallback: int) -> None:
+    with _JUDGE_STATS_LOCK:
+        _JUDGE_STATS["requested"] += requested
+        _JUDGE_STATS["success"] += success
+        _JUDGE_STATS["fallback"] += fallback
+
+
 def qa_judge_reward_fn(queries, completions, expected_answers, **kwargs):
     """混合判分：非简答走规则；简答走裁判 LLM，失败回退关键词覆盖率。"""
     groups = qa_reward._load_synonyms()
@@ -116,6 +136,12 @@ def qa_judge_reward_fn(queries, completions, expected_answers, **kwargs):
     if judge_jobs:
         with ThreadPoolExecutor(max_workers=JUDGE_CONCURRENCY) as ex:
             scores = list(ex.map(lambda job: _call_judge(job[1]), judge_jobs))
+        success = sum(score is not None for score in scores)
+        _record_judge_stats(
+            requested=len(judge_jobs),
+            success=success,
+            fallback=len(judge_jobs) - success,
+        )
         for (i, _), s in zip(judge_jobs, scores, strict=False):
             rewards[i] = s if s is not None else qa_reward._grade_one(
                 expected_answers[i], completions[i], groups)  # 回退

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from common.rewards import qa_judge_reward
 from common.rewards.qa_reward import (
     FORMAT_PENALTY,
     extract_boxed,
@@ -63,3 +64,25 @@ def test_reward_fn_returns_same_length():
     out = qa_rule_reward_fn(["", "", ""], comps, exps)
     assert len(out) == 3
     assert out[0] == 1.0 and out[1] == 0.0 and out[2] == FORMAT_PENALTY
+
+
+def test_judge_stats_track_success_and_fallback(monkeypatch):
+    qa_judge_reward.get_judge_stats(reset=True)
+
+    def fake_judge(prompt: str) -> float | None:
+        return 0.75 if "题目一" in prompt else None
+
+    monkeypatch.setattr(qa_judge_reward, "_call_judge", fake_judge)
+    rewards = qa_judge_reward.qa_judge_reward_fn(
+        ["题目：题目一", "题目：题目二"],
+        [r"回答一 \boxed{要点}", r"回答二 \boxed{无匹配}"],
+        ["[short] 要点", "[short] 正确内容"],
+    )
+    stats = qa_judge_reward.get_judge_stats(reset=True)
+    assert rewards == [0.75, 0.0]
+    assert stats == {"requested": 2, "success": 1, "fallback": 1}
+    assert qa_judge_reward.get_judge_stats() == {
+        "requested": 0,
+        "success": 0,
+        "fallback": 0,
+    }

@@ -8,6 +8,7 @@ import json
 import os
 import pprint
 import sys
+from collections import Counter
 from typing import Any
 
 from omegaconf import OmegaConf
@@ -30,7 +31,7 @@ from nemo_rl.utils.config import (
 )
 from nemo_rl.utils.logger import get_next_experiment_dir
 
-from common.environments.qa_search_core import STOP_STRINGS
+from common.environments.qa_search_core import STOP_STRINGS, qa_type_from_text
 from common.environments.qa_search_env import QASearchEnv
 
 TASK_NAME = "qa_search"
@@ -68,6 +69,10 @@ class QAAgentDataset(Dataset):
         self.output_key = output_key
         self.system_prompt = system_prompt
         self.chat_template_kwargs = dict(chat_template_kwargs or {})
+        type_counts = Counter(
+            qa_type_from_text(str(row[self.input_key])) for row in self.rows
+        )
+        print(f"数据集 {path} 题型分布：{dict(sorted(type_counts.items()))}")
 
     def __len__(self) -> int:
         return len(self.rows)

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from common.environments.qa_search_core import LocalMarkdownIndex, QASearchRunner
+from common.environments.qa_search_core import (
+    LocalMarkdownIndex,
+    QASearchRunner,
+    qa_reward_diagnostics,
+    qa_type_from_text,
+)
 from common.rewards.qa_reward import FORMAT_PENALTY, qa_rule_reward_fn
 
 
@@ -137,3 +142,32 @@ def test_empty_search_falls_back_to_question(runner):
     )
     assert not result.terminated
     assert "safety.md" in result.observation["content"]
+
+
+@pytest.mark.parametrize(
+    "text,want",
+    [
+        ("下面是一道单选题。", "single"),
+        ("下面是一道多选题。", "multiple"),
+        ("下面是一道判断题。", "bool"),
+        ("下面是一道填空题。", "fill"),
+        ("下面是一道简答题。", "short"),
+        ("未知题型", "unknown"),
+    ],
+)
+def test_qa_type_from_text(text, want):
+    assert qa_type_from_text(text) == want
+
+
+def test_reward_diagnostics_reports_type_and_group_variance():
+    metrics = qa_reward_diagnostics(
+        rewards=[0.0, 0.0, 0.0, 1.0, 0.5],
+        prompt_indices=[1, 1, 2, 2, 3],
+        question_types=["fill", "fill", "short", "short", "single"],
+    )
+    assert metrics["qa_type_fill_mean_reward"] == 0.0
+    assert metrics["qa_type_fill_zero_rate"] == 1.0
+    assert metrics["qa_type_short_mean_reward"] == 0.5
+    assert metrics["qa_multi_sample_group_count"] == 2.0
+    assert metrics["qa_zero_variance_group_rate"] == 0.5
+    assert metrics["qa_effective_group_rate"] == 0.5
