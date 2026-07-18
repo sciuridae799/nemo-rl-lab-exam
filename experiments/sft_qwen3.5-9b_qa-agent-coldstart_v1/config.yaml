@@ -21,6 +21,12 @@ policy:
     top_k: null
     stop_token_ids: null
     stop_strings: null
+    colocated:
+      # SFT 不启动生成 actor；该字段仅供 Megatron worker 初始化判断显存策略。
+      enabled: false
+      resources:
+        gpus_per_node: null
+        num_nodes: null
   max_total_sequence_length: 4096
   train_global_batch_size: 32
   train_micro_batch_size: 2
@@ -81,6 +87,9 @@ data:
   max_closed_scan_per_type: 32
   min_open_trajectories: 8
   weights_load_probe_only: true
+  # 前三次探针的数据统计完全一致；最后一次加载探针复用最近失败 run 已落盘的
+  # 训练集轨迹，跳过约三分钟的 98 万片段重建。正式 SFT 前必须清空。
+  reuse_coldstart_data_dir: /shared/outputs/pengyuyang/sft_qwen3.5-9b_qa-agent-coldstart_v1/sft_qwen3.5-9b_qa-agent-coldstart_v1-pengyuyang-20260718-222635/coldstart_data
   resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400
   resume_checkpoint_step: 30
   # setup_data 前由 run.py 替换成当前 run 生成的 JSONL。

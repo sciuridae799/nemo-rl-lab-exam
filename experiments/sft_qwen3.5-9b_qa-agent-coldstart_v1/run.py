@@ -202,47 +202,71 @@ def main() -> None:
     pprint.pprint(config)
 
     data_cfg = config["data"]
-    data_dir = Path(os.environ.get("QA_RL_DATA_DIR") or data_cfg["data_dir"])
-    train_rows = _read_jsonl(data_dir / "train.jsonl")
-    system_prompt = str(data_cfg["system_prompt"]).strip()
-    runner = _build_runner(config)
-    render_prompt = _render_prompt_factory(config["policy"]["model_name"], system_prompt)
-    trajectories, build_stats = build_coldstart_trajectories(
-        train_rows,
-        runner,
-        render_prompt,
-        target_open=int(data_cfg["target_open"]),
-        target_closed=int(data_cfg["target_closed"]),
-        max_open_scan=int(data_cfg["max_open_scan_per_type"]),
-        max_closed_scan=int(data_cfg["max_closed_scan_per_type"]),
-        seed=int(data_cfg["seed"]),
-    )
-    train_trajectories, validation_trajectories = split_trajectories(
-        trajectories,
-        validation_fraction=float(data_cfg["validation_fraction"]),
-        seed=int(data_cfg["seed"]),
-    )
-    build_stats.update({
-        "train_trajectory_count": len(train_trajectories),
-        "validation_trajectory_count": len(validation_trajectories),
-    })
-    print("QA冷启动数据：" + json.dumps(build_stats, ensure_ascii=False, sort_keys=True))
-    open_count = sum(row["category"] == "open" for row in trajectories)
-    if open_count < int(data_cfg["min_open_trajectories"]):
-        raise RuntimeError(
-            f"开放题正轨迹仅 {open_count}，低于门槛 {data_cfg['min_open_trajectories']}"
-        )
-    if len(train_trajectories) < int(config["policy"]["train_global_batch_size"]):
-        raise RuntimeError("训练轨迹不足一个 global batch")
-    if not validation_trajectories:
-        raise RuntimeError("冷启动 holdout 为空")
-
     output_root = Path(config["checkpointing"]["checkpoint_dir"])
-    data_output = output_root / "coldstart_data"
-    train_path = data_output / "train.jsonl"
-    validation_path = data_output / "validation.jsonl"
-    _write_openai_jsonl(train_path, train_trajectories)
-    _write_openai_jsonl(validation_path, validation_trajectories)
+    reuse_data_dir = str(data_cfg.get("reuse_coldstart_data_dir") or "").strip()
+    if reuse_data_dir:
+        data_output = Path(reuse_data_dir)
+        train_path = data_output / "train.jsonl"
+        validation_path = data_output / "validation.jsonl"
+        train_count = len(_read_jsonl(train_path))
+        validation_count = len(_read_jsonl(validation_path))
+        if train_count < int(config["policy"]["train_global_batch_size"]):
+            raise RuntimeError("复用的训练轨迹不足一个 global batch")
+        if validation_count == 0:
+            raise RuntimeError("复用的冷启动 holdout 为空")
+        print(
+            f"复用已验证冷启动数据：{data_output}；"
+            f"train={train_count}, holdout={validation_count}"
+        )
+    else:
+        data_dir = Path(os.environ.get("QA_RL_DATA_DIR") or data_cfg["data_dir"])
+        train_rows = _read_jsonl(data_dir / "train.jsonl")
+        system_prompt = str(data_cfg["system_prompt"]).strip()
+        runner = _build_runner(config)
+        render_prompt = _render_prompt_factory(
+            config["policy"]["model_name"], system_prompt
+        )
+        trajectories, build_stats = build_coldstart_trajectories(
+            train_rows,
+            runner,
+            render_prompt,
+            target_open=int(data_cfg["target_open"]),
+            target_closed=int(data_cfg["target_closed"]),
+            max_open_scan=int(data_cfg["max_open_scan_per_type"]),
+            max_closed_scan=int(data_cfg["max_closed_scan_per_type"]),
+            seed=int(data_cfg["seed"]),
+        )
+        train_trajectories, validation_trajectories = split_trajectories(
+            trajectories,
+            validation_fraction=float(data_cfg["validation_fraction"]),
+            seed=int(data_cfg["seed"]),
+        )
+        build_stats.update({
+            "train_trajectory_count": len(train_trajectories),
+            "validation_trajectory_count": len(validation_trajectories),
+        })
+        print(
+            "QA冷启动数据："
+            + json.dumps(build_stats, ensure_ascii=False, sort_keys=True)
+        )
+        open_count = sum(row["category"] == "open" for row in trajectories)
+        if open_count < int(data_cfg["min_open_trajectories"]):
+            raise RuntimeError(
+                f"开放题正轨迹仅 {open_count}，低于门槛 "
+                f"{data_cfg['min_open_trajectories']}"
+            )
+        if len(train_trajectories) < int(
+            config["policy"]["train_global_batch_size"]
+        ):
+            raise RuntimeError("训练轨迹不足一个 global batch")
+        if not validation_trajectories:
+            raise RuntimeError("冷启动 holdout 为空")
+
+        data_output = output_root / "coldstart_data"
+        train_path = data_output / "train.jsonl"
+        validation_path = data_output / "validation.jsonl"
+        _write_openai_jsonl(train_path, train_trajectories)
+        _write_openai_jsonl(validation_path, validation_trajectories)
     common_dataset_cfg = {
         "dataset_name": "openai_format",
         "chat_key": "messages",

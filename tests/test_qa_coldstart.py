@@ -105,6 +105,7 @@ def test_coldstart_sft_config_has_remote_master_config_fields():
 
     assert config["sft"]["only_unmask_final"] is False
     assert config["policy"]["tokenizer"]["chat_template"] is None
+    assert config["policy"]["generation"]["colocated"]["enabled"] is False
     assert set(config["policy"]["generation"]) >= {
         "backend",
         "max_new_tokens",
