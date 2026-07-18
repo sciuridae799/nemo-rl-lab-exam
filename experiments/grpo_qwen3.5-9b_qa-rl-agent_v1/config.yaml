@@ -29,14 +29,14 @@ policy:
     scheduler:
       lr_decay_style: "constant"
       lr_warmup_iters: 2
-      lr_decay_iters: 30
+      lr_decay_iters: 15
 
 grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # 正式训练配置；开放题仅在训练集采样阶段加权，验证集保持原分布。
-  max_num_steps: 30
+  # F8 短训练：验证候选召回改进能否转化为答案奖励。
+  max_num_steps: 15
   val_period: 5
   val_at_start: true
   val_at_end: true
@@ -55,8 +55,8 @@ data:
   input_key: query
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
-  # D2 只建立索引并比较检索，不初始化模型或训练；通过门槛后关闭。
-  retrieval_diagnostic: true
+  # 已完成 D4 检索诊断，进入短训练验证。
+  retrieval_diagnostic: false
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
   system_prompt: |-
