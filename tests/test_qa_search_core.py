@@ -15,6 +15,7 @@ from common.environments.qa_search_core import (
     qa_type_from_text,
     question_copy_score,
     rerank_answerable_hits,
+    source_family_key,
 )
 from common.rewards.qa_reward import FORMAT_PENALTY, qa_rule_reward_fn
 
@@ -309,3 +310,36 @@ def test_ascii_prefix_expansion_recovers_morphological_match(tmp_path):
     index = LocalMarkdownIndex(tmp_path, expand_ascii_tokens=True)
     hits = index.search("litho process", top_k=1)
     assert hits and hits[0].source == "litho.md"
+
+
+def test_source_family_key_links_exam_and_answer_files():
+    assert source_family_key("部门/设备培训-试卷.md") == source_family_key(
+        "部门/设备培训-答案.md"
+    )
+
+
+def test_structural_expansion_adds_adjacent_and_sibling_evidence(tmp_path):
+    question = "设备通过【1】连接洁净室"
+    (tmp_path / "模块-试卷.md").write_text(
+        "# 试卷\n\n"
+        + f"填空题：{question}\n"
+        + "题面说明" * 15
+        + "\n\n# 下一页\n\n相邻页说明该设备通过数据总线连接洁净室。",
+        encoding="utf-8",
+    )
+    (tmp_path / "模块-答案.md").write_text(
+        "# 参考答案\n\n设备通过数据总线连接洁净室。",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+    exam_chunk = next(
+        chunk for chunk in index.chunks if chunk.source.endswith("试卷.md") and "填空题" in chunk.text
+    )
+
+    expanded = index.expand_structural_candidates(
+        question,
+        [SearchHit(exam_chunk.source, exam_chunk.text, 10.0)],
+    )
+
+    assert any("相邻页说明" in hit.text for hit in expanded)
+    assert any(hit.source.endswith("答案.md") for hit in expanded)

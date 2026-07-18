@@ -55,3 +55,35 @@ def test_retrieval_ab_reports_answer_evidence_gain(tmp_path):
     assert report["reranked"]["evidence_coverage"] == pytest.approx(1.0)
     assert report["delta"]["evidence_coverage"] == pytest.approx(1.0)
     assert report["reranked"]["question_copy_rate"] < report["baseline"]["question_copy_rate"]
+
+
+def test_retrieval_ab_can_expand_sibling_answer_document(tmp_path):
+    question = "设备通过【1】连接洁净室"
+    (tmp_path / "模块-试卷.md").write_text(
+        "# 试卷\n\n" + (f"填空题：{question}\n" * 6),
+        encoding="utf-8",
+    )
+    (tmp_path / "模块-答案.md").write_text(
+        "# 参考答案\n\n设备通过数据总线连接洁净室。",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+    rows = [
+        {
+            "query": f"下面是一道填空题。\n\n题目：{question}",
+            "expected_answer": "[fill] 数据总线",
+        }
+    ]
+
+    report = evaluate_retrieval_ab(
+        rows,
+        index,
+        max_per_type=1,
+        top_k=1,
+        candidate_k=1,
+        structural_expansion=True,
+    )
+
+    assert report["structural_expansion"] is True
+    assert report["baseline"]["evidence_coverage"] == 0.0
+    assert report["reranked"]["evidence_coverage"] == 1.0

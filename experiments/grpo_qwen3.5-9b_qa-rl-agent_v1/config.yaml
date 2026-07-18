@@ -56,15 +56,14 @@ data:
   input_key: query
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
-  # 已完成 D4 检索诊断；R3a 先恢复 F4，不引入新检索变量。
-  retrieval_diagnostic: false
+  # R3b：只做训练集开放题的文档结构检索 A/B，不初始化模型。
+  retrieval_diagnostic: true
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
   open_loss_multiplier: 1.0
-  # 从历史 run 只读播种 step 30 到本次独立输出目录，禁止覆盖 F4。
-  resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400
+  resume_checkpoint_dir: ""
   resume_checkpoint_step: 30
-  resume_validation_only: true
+  resume_validation_only: false
   system_prompt: |-
     你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
     检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
@@ -82,8 +81,10 @@ env:
       # 仅对填空/简答从更多 BM25 候选中重排，最终回灌条数不变。
       candidate_k: 80
       candidate_max_per_source: 4
-      answerability_rerank: false
-      query_expansion: false
+      answerability_rerank: true
+      query_expansion: true
+      # 在 BM25 候选后补同源相邻块及同目录试卷/答案兄弟文档。
+      structural_expansion: true
       expand_ascii_tokens: false
       max_searches: 2
       max_result_chars: 1200

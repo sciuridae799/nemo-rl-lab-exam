@@ -32,6 +32,11 @@ _ANSWER_CUE = re.compile(
     re.IGNORECASE,
 )
 _SENTENCE_SPLIT = re.compile(r"[\n\r。！？!?；;]+")
+_SOURCE_ROLE = re.compile(
+    r"(?:参考|标准)?答案|答题卡|试卷|试题|题库|已审核|水印|"
+    r"\b(?:answer|solution|exam|quiz)\b|(?:^|[_-])ex$",
+    re.IGNORECASE,
+)
 _ENGLISH_STOPWORDS = {
     "a",
     "an",
@@ -111,6 +116,14 @@ def _terms(text: str, *, expand_ascii: bool = False) -> list[str]:
 def compact_text(text: str) -> str:
     """NFKC、小写并只保留字母数字和汉字，用于稳健的证据匹配。"""
     return "".join(char for char in _normalize(text) if char.isalnum())
+
+
+def source_family_key(source: str) -> str:
+    """去掉文档角色词，识别同目录下的试卷/答案等兄弟文件。"""
+    path = Path(str(source))
+    stem = compact_text(_SOURCE_ROLE.sub("", _normalize(path.stem)))
+    parent = compact_text(path.parent.as_posix())
+    return f"{parent}/{stem}" if stem else ""
 
 
 def _informative_terms(text: str) -> set[str]:
@@ -439,9 +452,19 @@ class LocalMarkdownIndex:
     def _build(self) -> None:
         self.doc_lengths: list[int] = []
         self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        self.source_doc_ids: dict[str, list[int]] = defaultdict(list)
+        self.doc_source_positions: list[int] = []
+        self.chunk_doc_ids: dict[tuple[str, str], list[int]] = defaultdict(list)
+        self.family_sources: dict[str, set[str]] = defaultdict(set)
         document_frequency: Counter[str] = Counter()
 
         for doc_id, chunk in enumerate(self.chunks):
+            self.doc_source_positions.append(len(self.source_doc_ids[chunk.source]))
+            self.source_doc_ids[chunk.source].append(doc_id)
+            self.chunk_doc_ids[(chunk.source, chunk.text)].append(doc_id)
+            family = source_family_key(chunk.source)
+            if family:
+                self.family_sources[family].add(chunk.source)
             counts = Counter(
                 _terms(
                     chunk.source + "\n" + chunk.text,
@@ -468,16 +491,8 @@ class LocalMarkdownIndex:
             for prefix, values in prefix_terms.items()
         }
 
-    def search(
-        self,
-        query: str,
-        *,
-        top_k: int = 3,
-        max_per_source: int = 2,
-        candidate_k: int | None = None,
-        rerank_question: str | None = None,
-        preserve_top_hit: bool = False,
-    ) -> list[SearchHit]:
+    def _score_query(self, query: str) -> dict[int, float]:
+        """计算全索引 BM25 分数，供普通搜索和结构扩展复用。"""
         query_counts = Counter(
             _terms(query, expand_ascii=self.expand_ascii_tokens)
         )
@@ -502,7 +517,22 @@ class LocalMarkdownIndex:
                 denominator = tf + self.k1 * (
                     1.0 - self.b + self.b * length / self.avg_doc_length
                 )
-                scores[doc_id] += query_tf * idf * tf * (self.k1 + 1.0) / denominator
+                scores[doc_id] += (
+                    query_tf * idf * tf * (self.k1 + 1.0) / denominator
+                )
+        return scores
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        max_per_source: int = 2,
+        candidate_k: int | None = None,
+        rerank_question: str | None = None,
+        preserve_top_hit: bool = False,
+    ) -> list[SearchHit]:
+        scores = self._score_query(query)
 
         # 每个来源只保留有限候选，避免对近百万命中片段做完整排序。
         source_heaps: dict[str, list[tuple[float, int, int]]] = defaultdict(list)
@@ -563,6 +593,61 @@ class LocalMarkdownIndex:
             key=lambda hit: hit.score,
             reverse=True,
         )[: max(1, int(candidate_k)) * max(1, len(queries))]
+
+    def expand_structural_candidates(
+        self,
+        query: str,
+        hits: list[SearchHit],
+        *,
+        neighbor_window: int = 1,
+        sibling_k: int = 4,
+        max_seed_hits: int = 160,
+    ) -> list[SearchHit]:
+        """补充同源相邻块和同文件族兄弟文档，不改变模型查询。"""
+        merged = {(hit.source, hit.text): hit for hit in hits}
+        query_scores = self._score_query(query)
+        sibling_sources: set[str] = set()
+
+        for hit in hits[: max(1, int(max_seed_hits))]:
+            doc_ids = self.chunk_doc_ids.get((hit.source, hit.text), [])
+            if doc_ids:
+                doc_id = doc_ids[0]
+                source_ids = self.source_doc_ids[hit.source]
+                position = self.doc_source_positions[doc_id]
+                for offset in range(-max(0, int(neighbor_window)), max(0, int(neighbor_window)) + 1):
+                    neighbor_position = position + offset
+                    if offset == 0 or not 0 <= neighbor_position < len(source_ids):
+                        continue
+                    neighbor_id = source_ids[neighbor_position]
+                    chunk = self.chunks[neighbor_id]
+                    key = (chunk.source, chunk.text)
+                    score = max(query_scores.get(neighbor_id, 0.0), hit.score * 0.85)
+                    previous = merged.get(key)
+                    if previous is None or score > previous.score:
+                        merged[key] = SearchHit(chunk.source, chunk.text, score)
+
+            family = source_family_key(hit.source)
+            if family:
+                sibling_sources.update(self.family_sources.get(family, set()))
+
+        sibling_sources.difference_update(hit.source for hit in hits)
+        for source in sibling_sources:
+            ranked_ids = heapq.nlargest(
+                max(1, int(sibling_k)),
+                self.source_doc_ids[source],
+                key=lambda doc_id: (query_scores.get(doc_id, 0.0), -doc_id),
+            )
+            for doc_id in ranked_ids:
+                score = query_scores.get(doc_id, 0.0)
+                if score <= 0.0:
+                    continue
+                chunk = self.chunks[doc_id]
+                key = (chunk.source, chunk.text)
+                previous = merged.get(key)
+                if previous is None or score > previous.score:
+                    merged[key] = SearchHit(chunk.source, chunk.text, score)
+
+        return sorted(merged.values(), key=lambda hit: hit.score, reverse=True)
 
 
 def _last_assistant_text(message_log: list[dict[str, Any]]) -> str:
@@ -694,6 +779,7 @@ class QASearchRunner:
         candidate_max_per_source: int = 4,
         answerability_rerank: bool = False,
         query_expansion: bool = False,
+        structural_expansion: bool = False,
         max_searches: int = 2,
         max_result_chars: int = 1500,
         evidence_reward_scale: float = 0.0,
@@ -705,6 +791,7 @@ class QASearchRunner:
         self.candidate_max_per_source = max(1, int(candidate_max_per_source))
         self.answerability_rerank = bool(answerability_rerank)
         self.query_expansion = bool(query_expansion)
+        self.structural_expansion = bool(structural_expansion)
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
         self.evidence_reward_scale = max(0.0, float(evidence_reward_scale))
@@ -845,6 +932,11 @@ class QASearchRunner:
                     candidate_k=self.candidate_k,
                     max_per_source=self.candidate_max_per_source,
                 )
+                if self.structural_expansion:
+                    candidate_hits = self.index.expand_structural_candidates(
+                        question,
+                        candidate_hits,
+                    )
                 hits = rerank_answerable_hits(
                     question,
                     candidate_hits,

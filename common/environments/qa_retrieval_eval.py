@@ -81,6 +81,7 @@ def evaluate_retrieval_ab(
     candidate_k: int = 20,
     candidate_max_per_source: int = 4,
     query_expansion: bool = False,
+    structural_expansion: bool = False,
 ) -> dict[str, Any]:
     """在训练集开放题上比较原始 BM25 与可回答性重排。"""
     grouped: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
@@ -118,6 +119,11 @@ def evaluate_retrieval_ab(
             candidate_k=candidate_k,
             max_per_source=candidate_max_per_source,
         )
+        if structural_expansion:
+            candidate_hits = index.expand_structural_candidates(
+                question,
+                candidate_hits,
+            )
         reranked_hits = rerank_answerable_hits(
             question,
             candidate_hits,
@@ -157,6 +163,7 @@ def evaluate_retrieval_ab(
         "candidate_k": int(candidate_k),
         "candidate_max_per_source": int(candidate_max_per_source),
         "query_expansion": bool(query_expansion),
+        "structural_expansion": bool(structural_expansion),
         "baseline": baseline_summary,
         "reranked": reranked_summary,
         "delta": {key: reranked_summary[key] - baseline_summary[key] for key in baseline_summary},
