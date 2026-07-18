@@ -21,17 +21,26 @@ policy:
     temperature: 0.7
     top_p: 0.8
     top_k: 20
+  # 短任务使用独立学习率日程，避免全程停留在 50-step 预热阶段。
+  megatron_cfg:
+    optimizer:
+      lr: 1.0e-5
+      min_lr: 1.0e-6
+    scheduler:
+      lr_decay_style: "constant"
+      lr_warmup_iters: 2
+      lr_decay_iters: 30
 
 grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # 官方 Agent 配方采用更大的 prompt 组；短跑 10 step 控制总时间。
-  max_num_steps: 10
-  val_period: 2
+  # 30 step 观察稳定趋势；平台侧按验证曲线执行早停。
+  max_num_steps: 30
+  val_period: 5
   val_at_start: true
   val_at_end: true
-  max_val_samples: 64
+  max_val_samples: 128
   val_batch_size: 32
   # Colocated vLLM 连续补采样会在反复唤醒时累积显存，单卡关闭。
   use_dynamic_sampling: false
