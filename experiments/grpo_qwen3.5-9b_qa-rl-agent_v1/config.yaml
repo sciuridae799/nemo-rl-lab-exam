@@ -9,6 +9,9 @@ policy:
   model_name: "Qwen/Qwen3.5-9B-Base"
   tokenizer:
     name: "Qwen/Qwen3.5-9B-Base"
+    # 工具标签必须出现在动作层，禁止在思考文本中提前触发停止串。
+    chat_template_kwargs:
+      enable_thinking: false
   max_total_sequence_length: 4096
   train_global_batch_size: 8
   generation_batch_size: 8
@@ -19,7 +22,7 @@ grpo:
   num_prompts_per_step: 1
   num_generations_per_prompt: 8
   max_rollout_turns: 3
-  max_num_steps: 2
+  max_num_steps: 1
   val_period: 1
   val_at_start: true
   val_at_end: true

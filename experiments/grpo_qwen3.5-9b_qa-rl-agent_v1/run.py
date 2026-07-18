@@ -60,12 +60,14 @@ class QAAgentDataset(Dataset):
         input_key: str,
         output_key: str,
         system_prompt: str,
+        chat_template_kwargs: dict[str, Any] | None = None,
     ):
         self.rows = _read_jsonl(path)
         self.tokenizer = tokenizer
         self.input_key = input_key
         self.output_key = output_key
         self.system_prompt = system_prompt
+        self.chat_template_kwargs = dict(chat_template_kwargs or {})
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -83,6 +85,7 @@ class QAAgentDataset(Dataset):
             tokenize=False,
             add_generation_prompt=True,
             add_special_tokens=False,
+            **self.chat_template_kwargs,
         ).strip()
         token_ids = self.tokenizer(
             prompt, return_tensors="pt", add_special_tokens=False
@@ -139,6 +142,7 @@ def main():
         str(data_cfg.get("input_key", "query")),
         str(data_cfg.get("output_key", "expected_answer")),
         system_prompt,
+        dict(config.policy["tokenizer"].get("chat_template_kwargs") or {}),
     )
     train_dataset = QAAgentDataset(
         os.path.join(data_dir, "train.jsonl"), *dataset_args
