@@ -10,6 +10,7 @@ from common.environments.qa_search_core import (
     SearchHit,
     build_query_variants,
     evidence_progress_coverage,
+    qa_loss_multiplier,
     qa_reward_diagnostics,
     qa_type_from_text,
     question_copy_score,
@@ -144,6 +145,28 @@ def test_evidence_progress_does_not_reward_words_already_in_question():
     )
 
     assert coverage == 0.0
+
+
+@pytest.mark.parametrize(
+    ("question", "is_training", "want"),
+    [
+        ("下面是一道填空题。", True, 0.25),
+        ("下面是一道简答题。", True, 0.25),
+        ("下面是一道单选题。", True, 1.0),
+        ("下面是一道简答题。", False, 1.0),
+    ],
+)
+def test_open_loss_multiplier_only_applies_to_training(
+    question, is_training, want
+):
+    assert (
+        qa_loss_multiplier(
+            question,
+            is_training=is_training,
+            open_loss_multiplier=0.25,
+        )
+        == want
+    )
 
 
 def test_invalid_format_gets_one_correction(runner):

@@ -35,7 +35,7 @@ grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # R1 短训练：只验证训练专用证据进展奖励能否打破开放题全零组。
+  # R2 短训练：保护封闭题/协议能力，验证开放题 shaping 的梯度干扰是否下降。
   max_num_steps: 15
   val_period: 5
   val_at_start: true
@@ -59,6 +59,8 @@ data:
   retrieval_diagnostic: false
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
+  # 仅 train 的填空/简答使用该 loss 权重；封闭题和 validation 固定为 1.0。
+  open_loss_multiplier: 0.25
   system_prompt: |-
     你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
     检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。

@@ -626,6 +626,18 @@ def qa_type_from_text(text: str) -> str:
     return "unknown"
 
 
+def qa_loss_multiplier(
+    question: str,
+    *,
+    is_training: bool,
+    open_loss_multiplier: float = 1.0,
+) -> float:
+    """可选地降低训练开放题的更新权重，验证和封闭题保持完整权重。"""
+    if not is_training or qa_type_from_text(question) not in {"fill", "short"}:
+        return 1.0
+    return max(0.0, min(1.0, float(open_loss_multiplier)))
+
+
 def qa_reward_diagnostics(
     rewards: list[float],
     prompt_indices: list[int],

@@ -35,6 +35,7 @@ from common.environments.qa_retrieval_eval import evaluate_retrieval_ab
 from common.environments.qa_search_core import (
     STOP_STRINGS,
     LocalMarkdownIndex,
+    qa_loss_multiplier,
     qa_type_from_text,
 )
 from common.environments.qa_search_env import QASearchEnv
@@ -67,6 +68,7 @@ class QAAgentDataset(Dataset):
         output_key: str,
         system_prompt: str,
         chat_template_kwargs: dict[str, Any] | None = None,
+        open_loss_multiplier: float = 1.0,
         *,
         is_training: bool,
     ):
@@ -77,10 +79,14 @@ class QAAgentDataset(Dataset):
         self.system_prompt = system_prompt
         self.chat_template_kwargs = dict(chat_template_kwargs or {})
         self.is_training = bool(is_training)
+        self.open_loss_multiplier = float(open_loss_multiplier)
         type_counts = Counter(
             qa_type_from_text(str(row[self.input_key])) for row in self.rows
         )
-        print(f"数据集 {path} 题型分布：{dict(sorted(type_counts.items()))}")
+        print(
+            f"数据集 {path} 题型分布：{dict(sorted(type_counts.items()))}；"
+            f"开放题 loss multiplier={(self.open_loss_multiplier if self.is_training else 1.0):.3f}"
+        )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -120,7 +126,11 @@ class QAAgentDataset(Dataset):
                 "evidence_coverage": 0.0,
                 "evidence_reward_total": 0.0,
             },
-            "loss_multiplier": 1.0,
+            "loss_multiplier": qa_loss_multiplier(
+                query,
+                is_training=self.is_training,
+                open_loss_multiplier=self.open_loss_multiplier,
+            ),
             "idx": idx,
             "task_name": TASK_NAME,
             "stop_strings": list(STOP_STRINGS),
@@ -197,6 +207,7 @@ def main():
         str(data_cfg.get("output_key", "expected_answer")),
         system_prompt,
         dict(config.policy["tokenizer"].get("chat_template_kwargs") or {}),
+        float(data_cfg.get("open_loss_multiplier", 1.0)),
     )
     train_dataset = QAAgentDataset(
         os.path.join(data_dir, "train.jsonl"),
