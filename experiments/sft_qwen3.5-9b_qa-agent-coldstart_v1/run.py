@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import pprint
@@ -46,6 +47,10 @@ from common.data.qa_coldstart import (
 from common.environments.qa_search_core import LocalMarkdownIndex, QASearchRunner
 from common.rewards.qa_reward import qa_rule_reward_fn
 from common.utils.checkpoint_seed import seed_checkpoint_step
+
+_PASSTHROUGH_CHAT_TEMPLATE = (
+    "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+)
 
 
 def parse_args():
@@ -111,6 +116,19 @@ def _build_runner(config: dict[str, Any]) -> QASearchRunner:
         # 只借用 metadata 计算证据覆盖，搜索 observation 和轮奖励不变。
         evidence_reward_scale=1.0,
     )
+
+
+def _build_master_config(config: dict[str, Any]) -> MasterConfig:
+    """兼容集群 Pydantic MasterConfig，同时保持轨迹的原样 token 流。"""
+    payload = copy.deepcopy(
+        {key: value for key, value in config.items() if key != "retrieval"}
+    )
+    tokenizer_cfg = payload["policy"]["tokenizer"]
+    if tokenizer_cfg.get("chat_template") is None:
+        # setup_data 已使用 NeMo 的 passthrough tokenizer 完成编码；这里的等价模板只用于
+        # 满足集群 Pydantic schema，且即使后续被读取也不会重新插入角色或特殊标签。
+        tokenizer_cfg["chat_template"] = _PASSTHROUGH_CHAT_TEMPLATE
+    return MasterConfig(**payload)
 
 
 def _seed_f4_weights_only(
@@ -245,11 +263,7 @@ def main() -> None:
     train_dataset, val_dataset = setup_data(tokenizer, config["data"])
     _seed_f4_weights_only(config, train_dataset)
 
-    # 集群镜像的 0.6.0 MasterConfig 是 Pydantic 属性对象；源码发行版仍可表现为
-    # TypedDict。两者都支持关键字构造，与现有 GRPO 入口保持一致。
-    master_config = MasterConfig(
-        **{key: value for key, value in config.items() if key != "retrieval"}
-    )
+    master_config = _build_master_config(config)
     (
         policy,
         _cluster,

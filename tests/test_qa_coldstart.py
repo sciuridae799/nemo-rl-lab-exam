@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from common.data.qa_coldstart import (
     build_coldstart_trajectories,
     expected_answer_payload,
@@ -7,6 +9,9 @@ from common.data.qa_coldstart import (
 )
 from common.environments.qa_search_core import LocalMarkdownIndex, QASearchRunner
 from common.rewards.qa_reward import qa_rule_reward_fn
+from nemo_rl_lab.config_resolve import resolve
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _runner(tmp_path):
@@ -88,3 +93,25 @@ def test_split_trajectories_never_crosses_group_key():
     validation_keys = {row["group_key"] for row in validation}
     assert train_keys.isdisjoint(validation_keys)
     assert train and validation
+
+
+def test_coldstart_sft_config_has_remote_master_config_fields():
+    config = resolve(
+        REPO_ROOT
+        / "experiments"
+        / "sft_qwen3.5-9b_qa-agent-coldstart_v1"
+        / "config.yaml"
+    )
+
+    assert config["sft"]["only_unmask_final"] is False
+    assert config["policy"]["tokenizer"]["chat_template"] is None
+    assert set(config["policy"]["generation"]) >= {
+        "backend",
+        "max_new_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stop_token_ids",
+        "stop_strings",
+        "vllm_cfg",
+    }

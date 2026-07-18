@@ -12,6 +12,15 @@ policy:
     # 轨迹首条消息已按线上模板渲染；后续动作/环境回灌必须原样拼接。
     chat_template: null
     chat_template_kwargs: null
+  # 集群版 PolicyConfig 即使在 SFT 中不启动生成后端，也要求完整 generation 结构。
+  generation:
+    backend: "vllm"
+    max_new_tokens: 4096
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
   max_total_sequence_length: 4096
   train_global_batch_size: 32
   train_micro_batch_size: 2
@@ -30,6 +39,8 @@ policy:
       lr_decay_iters: 8
 
 sft:
+  # 两个 assistant 回合（搜索动作和最终作答）都参与 loss。
+  only_unmask_final: false
   max_num_epochs: 1
   max_num_steps: 8
   val_period: 4
@@ -105,4 +116,3 @@ logger:
   tensorboard_enabled: false
   swanlab_enabled: false
   monitor_gpus: true
-
