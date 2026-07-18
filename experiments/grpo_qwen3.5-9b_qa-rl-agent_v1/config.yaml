@@ -56,7 +56,7 @@ data:
   input_key: query
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
-  # R3b：只做训练集开放题的文档结构检索 A/B，不初始化模型。
+  # R3d：只测语料→候选→结构扩展→Top-3 检索漏斗，不初始化模型。
   retrieval_diagnostic: true
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42

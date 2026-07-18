@@ -55,6 +55,9 @@ def test_retrieval_ab_reports_answer_evidence_gain(tmp_path):
     assert report["reranked"]["evidence_coverage"] == pytest.approx(1.0)
     assert report["delta"]["evidence_coverage"] == pytest.approx(1.0)
     assert report["reranked"]["question_copy_rate"] < report["baseline"]["question_copy_rate"]
+    assert report["funnel"]["corpus_evidence_coverage"] == pytest.approx(1.0)
+    assert report["funnel"]["candidate_pool_evidence_coverage"] == pytest.approx(1.0)
+    assert report["funnel"]["reranked_top3_evidence_coverage"] == pytest.approx(1.0)
 
 
 def test_retrieval_ab_can_expand_sibling_answer_document(tmp_path):
@@ -87,3 +90,32 @@ def test_retrieval_ab_can_expand_sibling_answer_document(tmp_path):
     assert report["structural_expansion"] is True
     assert report["baseline"]["evidence_coverage"] == 0.0
     assert report["reranked"]["evidence_coverage"] == 1.0
+    assert report["funnel"]["candidate_pool_evidence_coverage"] == 0.0
+    assert report["funnel"]["expanded_pool_evidence_coverage"] == 1.0
+    assert report["funnel"]["structural_coverage_improved_samples"] == 1
+
+
+def test_retrieval_funnel_separates_corpus_presence_from_query_recall(tmp_path):
+    (tmp_path / "unrelated.md").write_text(
+        "# 参考资料\n\n系统最终使用数据总线。",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+    rows = [
+        {
+            "query": "下面是一道填空题。\n\n题目：完全无关的提问【1】",
+            "expected_answer": "[fill] 数据总线",
+        }
+    ]
+
+    report = evaluate_retrieval_ab(
+        rows,
+        index,
+        max_per_type=1,
+        top_k=1,
+        candidate_k=1,
+    )
+
+    assert report["funnel"]["corpus_evidence_coverage"] == 1.0
+    assert report["funnel"]["candidate_pool_evidence_coverage"] == 0.0
+    assert report["funnel"]["candidate_missed_corpus_samples"] == 1
