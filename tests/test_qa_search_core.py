@@ -9,6 +9,7 @@ from common.environments.qa_search_core import (
     QASearchRunner,
     SearchHit,
     build_query_variants,
+    evidence_progress_coverage,
     qa_reward_diagnostics,
     qa_type_from_text,
     question_copy_score,
@@ -73,6 +74,76 @@ def test_search_then_final_answer(runner):
     assert final_result.reward == pytest.approx(1.0)
     assert final_result.terminated
     assert final_result.metadata is None
+
+
+def test_train_only_evidence_progress_reward_does_not_change_observation(runner):
+    shaped_runner = QASearchRunner(
+        runner.index,
+        qa_rule_reward_fn,
+        top_k=2,
+        max_searches=2,
+        max_result_chars=300,
+        evidence_reward_scale=0.1,
+    )
+    action = [{"role": "assistant", "content": "<search>离子注入 组成</search>"}]
+    base_metadata = {
+        "query": "下面是一道简答题。\n题目：离子注入系统的组成",
+        "expected_answer": "[short] 离子源 ||| 分析磁场 ||| 加速器",
+        "searches": 0,
+    }
+
+    train_result = shaped_runner.process_turn(
+        action,
+        {**base_metadata, "is_training": True},
+    )
+    validation_result = shaped_runner.process_turn(
+        action,
+        {**base_metadata, "is_training": False},
+    )
+
+    assert train_result.reward == 0.0
+    assert validation_result.reward == 0.0
+    assert train_result.observation == validation_result.observation
+    assert train_result.metadata["evidence_coverage"] == pytest.approx(1.0)
+
+    repeated = shaped_runner.process_turn(action, train_result.metadata)
+    assert repeated.reward == 0.0
+
+    shaped_final = shaped_runner.process_turn(
+        [{"role": "assistant", "content": "<answer>\\boxed{无关答案}</answer>"}],
+        train_result.metadata,
+    )
+    validation_final = shaped_runner.process_turn(
+        [{"role": "assistant", "content": "<answer>\\boxed{无关答案}</answer>"}],
+        validation_result.metadata,
+    )
+    assert shaped_final.reward == pytest.approx(0.1)
+    assert validation_final.reward == 0.0
+
+    invalid_final = shaped_runner.process_turn(
+        [{"role": "assistant", "content": "仍未按格式作答"}],
+        {**train_result.metadata, "correction_used": True},
+    )
+    assert invalid_final.reward == FORMAT_PENALTY
+
+
+def test_evidence_progress_does_not_reward_words_already_in_question():
+    question = "请画出一级疏散集合点的路线图"
+    hits = [
+        SearchHit(
+            "空白试卷.md",
+            "简答题：请画出一级疏散集合点的路线图",
+            1.0,
+        )
+    ]
+
+    coverage = evidence_progress_coverage(
+        question,
+        "[short] 一级疏散集合点 ||| 北门",
+        hits,
+    )
+
+    assert coverage == 0.0
 
 
 def test_invalid_format_gets_one_correction(runner):

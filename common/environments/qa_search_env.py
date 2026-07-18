@@ -53,8 +53,13 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             query_expansion=bool(cfg.get("query_expansion", False)),
             max_searches=int(cfg.get("max_searches", 2)),
             max_result_chars=int(cfg.get("max_result_chars", 1500)),
+            evidence_reward_scale=float(cfg.get("evidence_reward_scale", 0.0)),
         )
         print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")
+        print(
+            "训练专用证据进展奖励："
+            f"scale={self.runner.evidence_reward_scale:.3f}；验证样本固定关闭"
+        )
 
     def step(
         self,

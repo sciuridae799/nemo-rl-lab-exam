@@ -35,7 +35,7 @@ grpo:
   num_prompts_per_step: 4
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # F8 短训练：验证候选召回改进能否转化为答案奖励。
+  # R1 短训练：只验证训练专用证据进展奖励能否打破开放题全零组。
   max_num_steps: 15
   val_period: 5
   val_at_start: true
@@ -82,6 +82,9 @@ env:
       expand_ascii_tokens: false
       max_searches: 2
       max_result_chars: 1200
+      # 仅 train 样本按检索证据的 gold 要点新增覆盖率给小额奖励；validation 固定为 0。
+      # 两次检索累计上限仍为 0.10，终局正确性与格式奖励保持主导。
+      evidence_reward_scale: 0.10
       k1: 1.5
       b: 0.75
       use_judge: true

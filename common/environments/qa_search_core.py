@@ -19,6 +19,7 @@ _ASCII_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.+-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 _SEARCH = re.compile(r"<search>\s*(.*?)\s*</search>", re.IGNORECASE | re.DOTALL)
+_EXPECTED_ANSWER = re.compile(r"\s*\[(\w+)]\s*(.*)", re.DOTALL)
 _ASCII_SPLIT = re.compile(r"[^a-z0-9]+")
 _BLANK_MARKER = re.compile(r"【\s*\d+\s*】|\[\s*\d+\s*]|_{2,}|＿{2,}|\(\s*\)|（\s*）")
 _EXAM_CUE = re.compile(
@@ -178,6 +179,50 @@ def question_copy_score(question: str, text: str) -> float:
     if bridge < 0:
         score = 1.0
     return score
+
+
+def evidence_progress_coverage(
+    question: str,
+    expected: str,
+    hits: list[SearchHit],
+) -> float:
+    """训练时衡量检索新增了多少开放题答案证据，不把 gold 暴露给模型。"""
+    match = _EXPECTED_ANSWER.match(str(expected))
+    if not match or match.group(1) not in {"fill", "short"}:
+        return 0.0
+
+    question_compact = compact_text(question)
+    items: list[list[str]] = []
+    for raw_item in match.group(2).split("|||"):
+        alternatives = [
+            compact_text(part)
+            for part in re.split(r"[/／]", raw_item)
+            if compact_text(part)
+        ]
+        # 题干本身已经出现的词不算检索进展，避免奖励原题/空白试卷复刻。
+        novel = [
+            alternative
+            for alternative in alternatives
+            if alternative not in question_compact
+        ]
+        if novel:
+            items.append(novel)
+
+    if not items or not hits:
+        return 0.0
+
+    passage = "\n".join(hit.source + "\n" + hit.text for hit in hits)
+    compact_passage = compact_text(passage)
+    ascii_tokens = set(re.findall(r"[a-z0-9]+", _normalize(passage)))
+    covered = 0
+    for alternatives in items:
+        matched = any(
+            (len(alternative) >= 2 and alternative in compact_passage)
+            or (alternative.isdigit() and alternative in ascii_tokens)
+            for alternative in alternatives
+        )
+        covered += int(matched)
+    return covered / len(items)
 
 
 def _best_answer_sentence_score(question: str, text: str) -> float:
@@ -639,6 +684,7 @@ class QASearchRunner:
         query_expansion: bool = False,
         max_searches: int = 2,
         max_result_chars: int = 1500,
+        evidence_reward_scale: float = 0.0,
     ):
         self.index = index
         self.reward_fn = reward_fn
@@ -649,6 +695,7 @@ class QASearchRunner:
         self.query_expansion = bool(query_expansion)
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
+        self.evidence_reward_scale = max(0.0, float(evidence_reward_scale))
 
     def _next_action_hint(self, must_answer: bool) -> str:
         if must_answer:
@@ -737,6 +784,18 @@ class QASearchRunner:
             reward = float(
                 self.reward_fn([original_query], [assistant_text], [expected])[0]
             )
+            if (
+                reward >= 0.0
+                and self.evidence_reward_scale > 0.0
+                and bool(metadata.get("is_training", False))
+                and qa_type_from_text(original_query) in {"fill", "short"}
+            ):
+                reward = min(
+                    1.0,
+                    reward
+                    + self.evidence_reward_scale
+                    * float(metadata.get("evidence_coverage", 0.0)),
+                )
             return TurnResult(
                 observation={"role": "environment", "content": f"最终得分: {reward:.3f}"},
                 reward=reward,
@@ -785,6 +844,20 @@ class QASearchRunner:
             next_metadata = dict(metadata)
             next_metadata["searches"] = searches + 1
             next_metadata["must_answer"] = searches + 1 >= self.max_searches
+            if (
+                self.evidence_reward_scale > 0.0
+                and bool(metadata.get("is_training", False))
+                and qa_type_from_text(original_query) in {"fill", "short"}
+            ):
+                previous_coverage = float(metadata.get("evidence_coverage", 0.0))
+                current_coverage = max(
+                    previous_coverage,
+                    evidence_progress_coverage(question, expected, hits),
+                )
+                next_metadata["evidence_coverage"] = current_coverage
+                next_metadata["evidence_reward_total"] = (
+                    self.evidence_reward_scale * current_coverage
+                )
             return TurnResult(
                 observation={
                     "role": "environment",

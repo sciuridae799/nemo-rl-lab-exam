@@ -67,6 +67,8 @@ class QAAgentDataset(Dataset):
         output_key: str,
         system_prompt: str,
         chat_template_kwargs: dict[str, Any] | None = None,
+        *,
+        is_training: bool,
     ):
         self.rows = _read_jsonl(path)
         self.tokenizer = tokenizer
@@ -74,6 +76,7 @@ class QAAgentDataset(Dataset):
         self.output_key = output_key
         self.system_prompt = system_prompt
         self.chat_template_kwargs = dict(chat_template_kwargs or {})
+        self.is_training = bool(is_training)
         type_counts = Counter(
             qa_type_from_text(str(row[self.input_key])) for row in self.rows
         )
@@ -112,6 +115,10 @@ class QAAgentDataset(Dataset):
                 "searches": 0,
                 "must_answer": False,
                 "correction_used": False,
+                # 环境仅据此决定是否启用训练 shaping；验证始终保持官方奖励。
+                "is_training": self.is_training,
+                "evidence_coverage": 0.0,
+                "evidence_reward_total": 0.0,
             },
             "loss_multiplier": 1.0,
             "idx": idx,
@@ -194,8 +201,13 @@ def main():
     train_dataset = QAAgentDataset(
         os.path.join(data_dir, "train.jsonl"),
         *dataset_args,
+        is_training=True,
     )
-    val_dataset = QAAgentDataset(os.path.join(data_dir, "val.jsonl"), *dataset_args)
+    val_dataset = QAAgentDataset(
+        os.path.join(data_dir, "val.jsonl"),
+        *dataset_args,
+        is_training=False,
+    )
     print(f"训练集 {len(train_dataset)} 条，验证集 {len(val_dataset)} 条")
 
     env_cfg = dict(config.env[TASK_NAME]["cfg"])
