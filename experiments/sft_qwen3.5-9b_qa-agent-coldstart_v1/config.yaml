@@ -47,7 +47,7 @@ policy:
 sft:
   # 两个 assistant 回合（搜索动作和最终作答）都参与 loss。
   only_unmask_final: false
-  max_num_epochs: 1
+  max_num_epochs: 2
   max_num_steps: 8
   val_period: 4
   val_batches: 2
@@ -80,16 +80,14 @@ data:
     花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
   seed: 42
   validation_fraction: 0.10
-  # 首轮探针只构造 64 条左右并加载 F4，不执行 optimizer step。
-  target_open: 32
-  target_closed: 32
-  max_open_scan_per_type: 128
-  max_closed_scan_per_type: 32
-  min_open_trajectories: 8
-  weights_load_probe_only: true
-  # 前三次探针的数据统计完全一致；最后一次加载探针复用最近失败 run 已落盘的
-  # 训练集轨迹，跳过约三分钟的 98 万片段重建。正式 SFT 前必须清空。
-  reuse_coldstart_data_dir: /shared/outputs/pengyuyang/sft_qwen3.5-9b_qa-agent-coldstart_v1/sft_qwen3.5-9b_qa-agent-coldstart_v1-pengyuyang-20260718-222635/coldstart_data
+  # 正式数据上限：开放/封闭各 128；不足时不重复凑数。
+  target_open: 128
+  target_closed: 128
+  max_open_scan_per_type: 700
+  max_closed_scan_per_type: 48
+  min_open_trajectories: 96
+  weights_load_probe_only: false
+  reuse_coldstart_data_dir: ""
   resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400
   resume_checkpoint_step: 30
   # setup_data 前由 run.py 替换成当前 run 生成的 JSONL。

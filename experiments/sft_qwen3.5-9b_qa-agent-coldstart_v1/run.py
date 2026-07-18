@@ -314,7 +314,8 @@ def main() -> None:
         )
         logger.log_metrics(val_metrics, 0, prefix="validation")
         logger.log_metrics(validation_timings, 0, prefix="timing/validation")
-        print("F4 weights-only SFT 探针：" + json.dumps(val_metrics, sort_keys=True))
+        scalar_metrics = {key: float(value) for key, value in val_metrics.items()}
+        print("F4 weights-only SFT 探针：" + json.dumps(scalar_metrics, sort_keys=True))
         return
 
     sft_train(
