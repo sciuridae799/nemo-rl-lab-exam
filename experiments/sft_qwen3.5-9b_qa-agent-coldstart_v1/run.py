@@ -234,6 +234,9 @@ def main() -> None:
             target_closed=int(data_cfg["target_closed"]),
             max_open_scan=int(data_cfg["max_open_scan_per_type"]),
             max_closed_scan=int(data_cfg["max_closed_scan_per_type"]),
+            min_open_evidence_coverage=float(
+                data_cfg.get("min_open_evidence_coverage", 0.0)
+            ),
             seed=int(data_cfg["seed"]),
         )
         train_trajectories, validation_trajectories = split_trajectories(
@@ -278,6 +281,10 @@ def main() -> None:
         **common_dataset_cfg,
         "data_path": str(validation_path),
     }
+
+    if bool(data_cfg.get("data_build_only", False)):
+        print("冷启动数据诊断完成；data_build_only=true，不初始化模型")
+        return
 
     config["logger"]["log_dir"] = get_next_experiment_dir(
         config["logger"]["log_dir"]

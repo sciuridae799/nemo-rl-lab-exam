@@ -45,8 +45,8 @@ policy:
       lr_decay_iters: 8
 
 sft:
-  # 两个 assistant 回合（搜索动作和最终作答）都参与 loss。
-  only_unmask_final: false
+  # 下一训练候选只监督最终答案；当前 data_build_only 诊断不会初始化模型。
+  only_unmask_final: true
   max_num_epochs: 2
   max_num_steps: 8
   val_period: 4
@@ -80,12 +80,14 @@ data:
     花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
   seed: 42
   validation_fraction: 0.10
-  # 正式数据上限：开放/封闭各 128；不足时不重复凑数。
-  target_open: 128
-  target_closed: 128
+  # R5a 数据门：扫描全部唯一开放题候选，先测完整证据覆盖数量。
+  target_open: 1000
+  target_closed: 0
   max_open_scan_per_type: 700
-  max_closed_scan_per_type: 48
-  min_open_trajectories: 96
+  max_closed_scan_per_type: 0
+  min_open_trajectories: 0
+  min_open_evidence_coverage: 0.0
+  data_build_only: true
   weights_load_probe_only: false
   reuse_coldstart_data_dir: ""
   resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400

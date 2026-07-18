@@ -73,6 +73,40 @@ def test_coldstart_builder_keeps_grounded_open_and_closed_replay(tmp_path):
     assert "\\boxed{数据总线}" in grounded["messages"][-1]["content"]
 
 
+def test_coldstart_builder_can_require_fully_grounded_open_answer(tmp_path):
+    rows = [
+        {
+            "query": "下面是一道填空题。\n题目：设备通过【1】连接【2】",
+            "expected_answer": "[fill] 数据总线 ||| 洁净室",
+        }
+    ]
+    (tmp_path / "manual.md").write_text("设备通过数据总线运行。", encoding="utf-8")
+    runner = QASearchRunner(
+        LocalMarkdownIndex(tmp_path, chunk_chars=160),
+        qa_rule_reward_fn,
+        top_k=3,
+        answerability_rerank=True,
+        query_expansion=True,
+        evidence_reward_scale=1.0,
+        max_result_chars=500,
+    )
+
+    trajectories, stats = build_coldstart_trajectories(
+        rows,
+        runner,
+        lambda query: "PROMPT:" + query,
+        target_open=1,
+        target_closed=0,
+        max_open_scan=1,
+        max_closed_scan=0,
+        min_open_evidence_coverage=1.0,
+        seed=1,
+    )
+
+    assert trajectories == []
+    assert stats["trajectory_count"] == 0
+
+
 def test_split_trajectories_never_crosses_group_key():
     trajectories = [
         {
@@ -103,7 +137,9 @@ def test_coldstart_sft_config_has_remote_master_config_fields():
         / "config.yaml"
     )
 
-    assert config["sft"]["only_unmask_final"] is False
+    assert config["sft"]["only_unmask_final"] is True
+    assert config["data"]["data_build_only"] is True
+    assert config["data"]["min_open_evidence_coverage"] == 0.0
     assert config["policy"]["tokenizer"]["chat_template"] is None
     assert config["policy"]["generation"]["colocated"]["enabled"] is False
     assert set(config["policy"]["generation"]) >= {

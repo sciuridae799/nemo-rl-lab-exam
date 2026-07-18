@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 import re
 from collections import Counter, defaultdict
-from statistics import fmean
+from statistics import fmean, median
 from typing import Any, Callable
 
 from common.environments.qa_search_core import (
@@ -55,6 +55,8 @@ def _build_one_trajectory(
     row: dict[str, Any],
     runner: QASearchRunner,
     render_prompt: Callable[[str], str],
+    *,
+    min_open_evidence_coverage: float = 0.0,
 ) -> tuple[dict[str, Any] | None, float]:
     query = str(row["query"])
     expected = str(row["expected_answer"])
@@ -80,8 +82,10 @@ def _build_one_trajectory(
     if search_result.terminated or search_result.metadata is None:
         return None, 0.0
     evidence_coverage = float(search_result.metadata.get("evidence_coverage", 0.0))
-    if question_type in _OPEN_TYPES and evidence_coverage <= 0.0:
-        return None, evidence_coverage
+    if question_type in _OPEN_TYPES:
+        required_coverage = max(0.0, float(min_open_evidence_coverage))
+        if evidence_coverage <= 0.0 or evidence_coverage + 1e-9 < required_coverage:
+            return None, evidence_coverage
 
     final_answer = (
         "<answer>根据题目与检索结果，"
@@ -124,6 +128,7 @@ def build_coldstart_trajectories(
     target_closed: int,
     max_open_scan: int,
     max_closed_scan: int,
+    min_open_evidence_coverage: float = 0.0,
     seed: int = 42,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """按题型配额扫描训练题；不足时如实返回，不重复凑数。"""
@@ -159,18 +164,25 @@ def build_coldstart_trajectories(
     scanned = Counter()
     selected_counts = Counter()
     open_coverages: list[float] = []
+    open_coverages_by_type: dict[str, list[float]] = defaultdict(list)
     for question_type in ("fill", "short", "single", "multiple", "bool"):
         for row in grouped.get(question_type, [])[: scan_limits[question_type]]:
             if selected_counts[question_type] >= targets[question_type]:
                 break
             scanned[question_type] += 1
-            trajectory, coverage = _build_one_trajectory(row, runner, render_prompt)
+            trajectory, coverage = _build_one_trajectory(
+                row,
+                runner,
+                render_prompt,
+                min_open_evidence_coverage=min_open_evidence_coverage,
+            )
             if trajectory is None:
                 continue
             selected.append(trajectory)
             selected_counts[question_type] += 1
             if question_type in _OPEN_TYPES:
                 open_coverages.append(coverage)
+                open_coverages_by_type[question_type].append(coverage)
 
     rng.shuffle(selected)
     stats = {
@@ -182,9 +194,29 @@ def build_coldstart_trajectories(
         "scanned_by_type": dict(sorted(scanned.items())),
         "selected_by_type": dict(sorted(selected_counts.items())),
         "trajectory_count": len(selected),
+        "min_open_evidence_coverage": float(min_open_evidence_coverage),
         "mean_open_evidence_coverage": (
             fmean(open_coverages) if open_coverages else 0.0
         ),
+        "median_open_evidence_coverage": (
+            median(open_coverages) if open_coverages else 0.0
+        ),
+        "full_open_evidence_count": sum(
+            coverage >= 1.0 - 1e-9 for coverage in open_coverages
+        ),
+        "open_evidence_coverage_by_type": {
+            question_type: {
+                "count": len(coverages),
+                "mean": fmean(coverages),
+                "median": median(coverages),
+                "full_count": sum(
+                    coverage >= 1.0 - 1e-9 for coverage in coverages
+                ),
+                "ge_0_75_count": sum(coverage >= 0.75 for coverage in coverages),
+            }
+            for question_type, coverages in sorted(open_coverages_by_type.items())
+            if coverages
+        },
     }
     return selected, stats
 
