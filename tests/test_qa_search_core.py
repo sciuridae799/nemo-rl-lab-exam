@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from common.environments.qa_search_core import (
+    ANSWERABILITY_FEATURE_NAMES,
     LocalMarkdownIndex,
     QASearchRunner,
     SearchHit,
+    answerability_feature_rows,
     build_query_variants,
     evidence_progress_coverage,
     extract_answerable_snippets,
@@ -295,6 +297,17 @@ def test_answerability_rerank_prefers_filled_evidence_over_blank_exam():
     assert question_copy_score(question, blank_exam.text) == 1.0
     assert question_copy_score(question, answer_manual.text) == 0.0
     assert ranked[0].source == "操作手册.md"
+
+
+def test_answerability_features_are_gold_free_and_fixed_width():
+    rows = answerability_feature_rows(
+        "设备通过【1】连接洁净室",
+        [SearchHit("参考答案.md", "设备通过数据总线连接洁净室。", 3.0)],
+    )
+
+    assert len(rows) == 1
+    assert len(rows[0]) == len(ANSWERABILITY_FEATURE_NAMES)
+    assert rows[0][ANSWERABILITY_FEATURE_NAMES.index("cloze_bridge")] == 1.0
 
 
 def test_query_variants_split_ascii_and_cloze_context():

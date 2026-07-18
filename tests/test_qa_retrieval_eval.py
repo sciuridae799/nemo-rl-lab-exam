@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from common.environments.qa_retrieval_eval import (
+    _fit_linear_reranker,
+    _linear_reranker_cross_validation,
+    _predict_linear_reranker,
     evaluate_retrieval_ab,
     evidence_coverage,
 )
@@ -120,3 +124,49 @@ def test_retrieval_funnel_separates_corpus_presence_from_query_recall(tmp_path):
     assert report["funnel"]["corpus_evidence_coverage"] == 1.0
     assert report["funnel"]["candidate_pool_evidence_coverage"] == 0.0
     assert report["funnel"]["candidate_missed_corpus_samples"] == 1
+
+
+def test_linear_reranker_fit_prefers_positive_feature():
+    groups = [
+        {
+            "features": [[0.0, 1.0], [1.0, 0.0]],
+            "labels": [0.0, 1.0],
+        },
+        {
+            "features": [[0.2, 1.0], [0.8, 0.0]],
+            "labels": [0.0, 1.0],
+        },
+    ]
+
+    model = _fit_linear_reranker(groups, l2=0.01)
+    predictions = _predict_linear_reranker(
+        model,
+        np.asarray([[0.1, 1.0], [0.9, 0.0]]),
+    )
+
+    assert predictions[1] > predictions[0]
+
+
+def test_linear_reranker_cross_validation_holds_out_whole_questions():
+    groups = []
+    for index in range(8):
+        positive = [0.0] * 11
+        positive[0] = 1.0
+        negative = [0.0] * 11
+        groups.append({
+            "type": "fill" if index % 2 == 0 else "short",
+            "expected": "[fill] 数据总线",
+            "hits": [
+                SearchHit(f"answer-{index}.md", "数据总线", 2.0),
+                SearchHit(f"exam-{index}.md", "空白题面", 1.0),
+            ],
+            "features": np.asarray([positive, negative]),
+            "labels": np.asarray([1.0, 0.0]),
+            "baseline": 0.0,
+        })
+
+    report = _linear_reranker_cross_validation(groups, top_k=1, folds=4)
+
+    assert report["sample_count"] == 8
+    assert report["heldout_evidence_coverage"] == 1.0
+    assert report["by_type"]["fill"]["count"] == 4

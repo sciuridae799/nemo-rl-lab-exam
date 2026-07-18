@@ -56,7 +56,7 @@ data:
   input_key: query
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
-  # R3e：离线筛查句子级压缩与同正文预算多证据打包，不初始化模型。
+  # R3f：按整题分组交叉验证训练集监督线性重排器，不初始化模型。
   retrieval_diagnostic: true
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42

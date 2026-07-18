@@ -8,10 +8,14 @@ from collections import defaultdict
 from statistics import fmean
 from typing import Any
 
+import numpy as np
+
 from common.environments.qa_search_core import (
+    ANSWERABILITY_FEATURE_NAMES,
     LocalMarkdownIndex,
     SearchHit,
     _question_text,
+    answerability_feature_rows,
     build_query_variants,
     compact_text,
     extract_answerable_snippets,
@@ -126,6 +130,223 @@ def _mean(values: list[float]) -> float:
     return fmean(values) if values else 0.0
 
 
+def _fit_linear_reranker(
+    groups: list[dict[str, Any]],
+    *,
+    l2: float = 1.0,
+) -> dict[str, np.ndarray | float]:
+    """按题目等权、题内平衡正负候选，拟合可复现的加权岭回归。"""
+    feature_parts: list[np.ndarray] = []
+    label_parts: list[np.ndarray] = []
+    weight_parts: list[np.ndarray] = []
+    for group in groups:
+        features = np.asarray(group["features"], dtype=np.float64)
+        labels = np.asarray(group["labels"], dtype=np.float64)
+        if not len(labels):
+            continue
+        positive = labels > 0.0
+        positive_count = int(positive.sum())
+        negative_count = len(labels) - positive_count
+        weights = np.full(len(labels), 1.0 / len(labels), dtype=np.float64)
+        if positive_count and negative_count:
+            positive_multiplier = min(25.0, negative_count / positive_count)
+            weights[positive] *= positive_multiplier
+        feature_parts.append(features)
+        label_parts.append(labels)
+        weight_parts.append(weights)
+
+    if not feature_parts:
+        raise ValueError("线性重排器没有可用候选")
+    features = np.concatenate(feature_parts)
+    labels = np.concatenate(label_parts)
+    sample_weights = np.concatenate(weight_parts)
+    sample_weights /= sample_weights.sum()
+
+    mean = np.average(features, axis=0, weights=sample_weights)
+    variance = np.average((features - mean) ** 2, axis=0, weights=sample_weights)
+    scale = np.sqrt(variance)
+    scale[scale < 1.0e-8] = 1.0
+    standardized = (features - mean) / scale
+    design = np.column_stack([standardized, np.ones(len(standardized))])
+    weighted_design = design * np.sqrt(sample_weights)[:, None]
+    weighted_labels = labels * np.sqrt(sample_weights)
+    regularizer = np.eye(design.shape[1], dtype=np.float64) * max(0.0, float(l2))
+    regularizer[-1, -1] = 0.0
+    gram = weighted_design.T @ weighted_design + regularizer
+    target = weighted_design.T @ weighted_labels
+    try:
+        fitted = np.linalg.solve(gram, target)
+    except np.linalg.LinAlgError:
+        fitted = np.linalg.lstsq(gram, target, rcond=None)[0]
+    return {
+        "mean": mean,
+        "scale": scale,
+        "weights": fitted[:-1],
+        "intercept": float(fitted[-1]),
+    }
+
+
+def _predict_linear_reranker(
+    model: dict[str, np.ndarray | float],
+    features: np.ndarray,
+) -> np.ndarray:
+    standardized = (
+        np.asarray(features, dtype=np.float64) - np.asarray(model["mean"])
+    ) / np.asarray(model["scale"])
+    return standardized @ np.asarray(model["weights"]) + float(model["intercept"])
+
+
+def _select_linear_hits(
+    hits: list[SearchHit],
+    predictions: np.ndarray,
+    *,
+    top_k: int,
+    max_per_source: int = 2,
+) -> list[SearchHit]:
+    """按学习分数选取来源多样的短证据，不使用 gold。"""
+    ordered = sorted(
+        range(len(hits)),
+        key=lambda position: (
+            float(predictions[position]),
+            hits[position].score,
+            -position,
+        ),
+        reverse=True,
+    )
+    selected: list[SearchHit] = []
+    selected_positions: set[int] = set()
+    source_counts: dict[str, int] = defaultdict(int)
+    for position in ordered:
+        hit = hits[position]
+        if source_counts[hit.source] >= max(1, int(max_per_source)):
+            continue
+        selected.append(hit)
+        selected_positions.add(position)
+        source_counts[hit.source] += 1
+        if len(selected) >= max(1, int(top_k)):
+            return selected
+    for position in ordered:
+        if position in selected_positions:
+            continue
+        selected.append(hits[position])
+        if len(selected) >= max(1, int(top_k)):
+            break
+    return selected
+
+
+def _linear_reranker_cross_validation(
+    groups: list[dict[str, Any]],
+    *,
+    top_k: int,
+    folds: int = 4,
+) -> dict[str, Any]:
+    """按整道题分折评估，禁止同题候选同时进入拟合和测试。"""
+    groups = [group for group in groups if len(group["hits"])]
+    if not groups:
+        return {
+            "sample_count": 0,
+            "folds": 0,
+            "top_k": int(top_k),
+            "heldout_evidence_coverage": 0.0,
+            "baseline_top3_evidence_coverage": 0.0,
+            "gain_vs_top3": 0.0,
+            "regressed_samples": 0,
+            "fold_evidence_coverage": [],
+            "by_type": {},
+            "positive_candidate_rate": 0.0,
+            "model": None,
+        }
+    fold_count = min(max(2, int(folds)), len(groups))
+    fold_assignments: dict[int, int] = {}
+    by_type_indices: dict[str, list[int]] = defaultdict(list)
+    for index, group in enumerate(groups):
+        by_type_indices[str(group["type"])].append(index)
+    for indices in by_type_indices.values():
+        for rank, index in enumerate(indices):
+            fold_assignments[index] = rank % fold_count
+
+    heldout_rows: list[dict[str, Any]] = []
+    fold_coverages: list[float] = []
+    for fold in range(fold_count):
+        train_groups = [
+            group
+            for index, group in enumerate(groups)
+            if fold_assignments[index] != fold
+        ]
+        test_groups = [
+            group
+            for index, group in enumerate(groups)
+            if fold_assignments[index] == fold
+        ]
+        if not train_groups or not test_groups:
+            continue
+        model = _fit_linear_reranker(train_groups)
+        fold_values: list[float] = []
+        for group in test_groups:
+            predictions = _predict_linear_reranker(model, group["features"])
+            selected = _select_linear_hits(
+                group["hits"],
+                predictions,
+                top_k=top_k,
+            )
+            coverage = evidence_coverage(group["expected"], selected)
+            fold_values.append(coverage)
+            heldout_rows.append({
+                "type": group["type"],
+                "coverage": coverage,
+                "baseline": group["baseline"],
+            })
+        fold_coverages.append(_mean(fold_values))
+
+    full_model = _fit_linear_reranker(groups)
+    heldout_coverage = _mean([row["coverage"] for row in heldout_rows])
+    baseline_coverage = _mean([row["baseline"] for row in heldout_rows])
+    positive_candidates = sum(
+        int((np.asarray(group["labels"]) > 0.0).sum()) for group in groups
+    )
+    candidate_count = sum(len(group["labels"]) for group in groups)
+    return {
+        "sample_count": len(heldout_rows),
+        "folds": fold_count,
+        "top_k": int(top_k),
+        "heldout_evidence_coverage": heldout_coverage,
+        "baseline_top3_evidence_coverage": baseline_coverage,
+        "gain_vs_top3": heldout_coverage - baseline_coverage,
+        "regressed_samples": sum(
+            row["coverage"] < row["baseline"] for row in heldout_rows
+        ),
+        "fold_evidence_coverage": fold_coverages,
+        "by_type": {
+            question_type: {
+                "count": sum(row["type"] == question_type for row in heldout_rows),
+                "heldout_evidence_coverage": _mean([
+                    row["coverage"]
+                    for row in heldout_rows
+                    if row["type"] == question_type
+                ]),
+                "baseline_top3_evidence_coverage": _mean([
+                    row["baseline"]
+                    for row in heldout_rows
+                    if row["type"] == question_type
+                ]),
+            }
+            for question_type in sorted(by_type_indices)
+        },
+        "positive_candidate_rate": (
+            positive_candidates / candidate_count if candidate_count else 0.0
+        ),
+        "model": {
+            "feature_names": list(ANSWERABILITY_FEATURE_NAMES),
+            "mean": [float(value) for value in np.asarray(full_model["mean"])],
+            "scale": [float(value) for value in np.asarray(full_model["scale"])],
+            "weights": [
+                float(value) for value in np.asarray(full_model["weights"])
+            ],
+            "intercept": float(full_model["intercept"]),
+        },
+    }
+
+
 def evaluate_retrieval_ab(
     rows: list[dict[str, Any]],
     index: LocalMarkdownIndex,
@@ -174,6 +395,7 @@ def evaluate_retrieval_ab(
     structural_coverage_improved = 0
     candidate_missed_corpus = 0
     reranker_dropped_evidence = 0
+    linear_groups: list[dict[str, Any]] = []
     examples: list[dict[str, Any]] = []
     improved = 0
     regressed = 0
@@ -228,6 +450,23 @@ def evaluate_retrieval_ab(
         expanded_coverage = evidence_coverage(expected, candidate_hits)
         snippet_pool_coverage = evidence_coverage(expected, snippet_hits)
         packed_coverage = evidence_coverage(expected, packed_hits)
+        snippet_features = np.asarray(
+            answerability_feature_rows(question, snippet_hits),
+            dtype=np.float64,
+        )
+        snippet_labels = np.asarray(
+            [evidence_coverage(expected, [hit]) for hit in snippet_hits],
+            dtype=np.float64,
+        )
+        linear_groups.append({
+            "row_index": row_index,
+            "type": question_type,
+            "expected": expected,
+            "hits": snippet_hits,
+            "features": snippet_features,
+            "labels": snippet_labels,
+            "baseline": reranked["evidence_coverage"],
+        })
         baseline_rows.append(baseline)
         reranked_rows.append(reranked)
         per_type[question_type]["baseline"].append(baseline)
@@ -272,6 +511,10 @@ def evaluate_retrieval_ab(
 
     baseline_summary = _mean_stats(baseline_rows)
     reranked_summary = _mean_stats(reranked_rows)
+    linear_reranker_cv = _linear_reranker_cross_validation(
+        linear_groups,
+        top_k=packing_top_k,
+    )
     funnel_summary = {
         f"{stage}_evidence_coverage": _mean(values)
         for stage, values in sorted(funnel_values.items())
@@ -319,6 +562,7 @@ def evaluate_retrieval_ab(
         "structural_expansion": bool(structural_expansion),
         "packing_top_k": int(packing_top_k),
         "packing_snippet_chars": int(packing_snippet_chars),
+        "linear_reranker_cv": linear_reranker_cv,
         "funnel": funnel_summary,
         "baseline": baseline_summary,
         "reranked": reranked_summary,

@@ -62,6 +62,32 @@ _QA_TYPE_MARKERS = {
     "fill": "一道填空题",
     "short": "一道简答题",
 }
+ANSWERABILITY_FEATURE_NAMES = (
+    "bm25",
+    "question_coverage",
+    "ascii_coverage",
+    "answer_sentence",
+    "answer_cue",
+    "new_numeric_value",
+    "cloze_bridge",
+    "source_answer_cue",
+    "source_exam_copy",
+    "question_copy",
+    "negative_bridge",
+)
+_ANSWERABILITY_DEFAULT_WEIGHTS = (
+    0.35,
+    0.20,
+    0.10,
+    0.20,
+    0.10,
+    0.05,
+    0.75,
+    0.08,
+    -0.10,
+    -0.80,
+    -0.25,
+)
 
 
 @dataclass(frozen=True)
@@ -316,14 +342,11 @@ def _content_similarity(left: str, right: str) -> float:
     return len(left_terms & right_terms) / len(union) if union else 0.0
 
 
-def rerank_answerable_hits(
+def answerability_feature_rows(
     question: str,
     hits: list[SearchHit],
-    *,
-    top_k: int,
-    baseline_hits: list[SearchHit] | None = None,
-) -> list[SearchHit]:
-    """在少量 BM25 候选中优先选择可回答、非重复的证据片段。"""
+) -> list[tuple[float, ...]]:
+    """提取 gold 无关的候选特征，供固定规则与训练集监督重排共用。"""
     if not hits:
         return []
 
@@ -332,24 +355,30 @@ def rerank_answerable_hits(
     question_ascii = {
         term
         for term in _ASCII_TOKEN.findall(_normalize(question))
-        if term not in _ENGLISH_STOPWORDS and (len(term) >= 3 or any(c.isdigit() for c in term))
+        if term not in _ENGLISH_STOPWORDS
+        and (len(term) >= 3 or any(char.isdigit() for char in term))
     }
-    question_numbers = {term for term in _ASCII_TOKEN.findall(_normalize(question)) if any(c.isdigit() for c in term)}
+    question_numbers = {
+        term
+        for term in _ASCII_TOKEN.findall(_normalize(question))
+        if any(char.isdigit() for char in term)
+    }
 
-    scored: list[tuple[float, int, SearchHit]] = []
-    for position, hit in enumerate(hits):
-        if high > low:
-            bm25 = (hit.score - low) / (high - low)
-        else:
-            bm25 = 1.0
+    rows: list[tuple[float, ...]] = []
+    for hit in hits:
+        bm25 = (hit.score - low) / (high - low) if high > low else 1.0
         passage = hit.source + "\n" + hit.text
-        coverage = _term_coverage(question, passage)
         ascii_terms = set(_ASCII_TOKEN.findall(_normalize(passage)))
-        ascii_coverage = len(question_ascii & ascii_terms) / len(question_ascii) if question_ascii else 0.0
-        new_values = {term for term in ascii_terms - question_numbers if any(c.isdigit() for c in term)}
-        value_bonus = min(1.0, len(new_values) / 2.0)
-        answer_cue = 1.0 if _ANSWER_CUE.search(hit.text) else 0.0
-        sentence_score = _best_answer_sentence_score(question, hit.text)
+        ascii_coverage = (
+            len(question_ascii & ascii_terms) / len(question_ascii)
+            if question_ascii
+            else 0.0
+        )
+        new_values = {
+            term
+            for term in ascii_terms - question_numbers
+            if any(char.isdigit() for char in term)
+        }
         bridge = _cloze_bridge_signal(question, hit.text)
         copy_score = question_copy_score(question, hit.text)
         source_answer_cue = bool(
@@ -362,18 +391,45 @@ def rerank_answerable_hits(
         source_exam_cue = bool(
             re.search(r"试卷|试题|题库|exam|quiz", hit.source, re.IGNORECASE)
         )
-        score = (
-            0.35 * bm25
-            + 0.20 * coverage
-            + 0.10 * ascii_coverage
-            + 0.20 * sentence_score
-            + 0.10 * answer_cue
-            + 0.05 * value_bonus
-            + 0.75 * max(0.0, bridge)
-            + 0.08 * float(source_answer_cue)
-            - 0.10 * float(source_exam_cue and copy_score >= 0.5)
-            - 0.80 * copy_score
-            - 0.25 * max(0.0, -bridge)
+        rows.append(
+            (
+                bm25,
+                _term_coverage(question, passage),
+                ascii_coverage,
+                _best_answer_sentence_score(question, hit.text),
+                float(bool(_ANSWER_CUE.search(hit.text))),
+                min(1.0, len(new_values) / 2.0),
+                max(0.0, bridge),
+                float(source_answer_cue),
+                float(source_exam_cue and copy_score >= 0.5),
+                copy_score,
+                max(0.0, -bridge),
+            )
+        )
+    return rows
+
+
+def rerank_answerable_hits(
+    question: str,
+    hits: list[SearchHit],
+    *,
+    top_k: int,
+    baseline_hits: list[SearchHit] | None = None,
+) -> list[SearchHit]:
+    """在少量 BM25 候选中优先选择可回答、非重复的证据片段。"""
+    if not hits:
+        return []
+
+    scored: list[tuple[float, int, SearchHit]] = []
+    feature_rows = answerability_feature_rows(question, hits)
+    for position, (hit, features) in enumerate(zip(hits, feature_rows, strict=True)):
+        score = sum(
+            weight * value
+            for weight, value in zip(
+                _ANSWERABILITY_DEFAULT_WEIGHTS,
+                features,
+                strict=True,
+            )
         )
         scored.append((score, position, SearchHit(hit.source, hit.text, score)))
 
