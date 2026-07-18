@@ -20,11 +20,16 @@ def seed_checkpoint_step(
     source_root: str | Path,
     target_root: str | Path,
     step: int,
+    *,
+    target_step: int | None = None,
 ) -> Path:
     """把 ``source_root/step_N`` 放入空的新 run，绝不覆盖已有 step。"""
     step = int(step)
     if step < 0:
         raise ValueError("checkpoint step 必须非负")
+    target_step = step if target_step is None else int(target_step)
+    if target_step < 0:
+        raise ValueError("目标 checkpoint step 必须非负")
 
     source_root = Path(source_root).expanduser()
     target_root = Path(target_root).expanduser()
@@ -49,6 +54,6 @@ def seed_checkpoint_step(
             + ", ".join(str(path) for path in existing_steps)
         )
 
-    target_step = target_root / source_step.name
-    shutil.copytree(source_step, target_step, copy_function=_link_or_copy)
-    return target_step
+    target_step_path = target_root / f"step_{target_step}"
+    shutil.copytree(source_step, target_step_path, copy_function=_link_or_copy)
+    return target_step_path

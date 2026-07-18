@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from common.data.qa_coldstart import (
+    build_coldstart_trajectories,
+    expected_answer_payload,
+    split_trajectories,
+)
+from common.environments.qa_search_core import LocalMarkdownIndex, QASearchRunner
+from common.rewards.qa_reward import qa_rule_reward_fn
+
+
+def _runner(tmp_path):
+    (tmp_path / "manual.md").write_text(
+        "# 系统说明\n\n设备通过数据总线连接洁净室。\n\n离子注入系统由离子源和分析磁场组成。",
+        encoding="utf-8",
+    )
+    return QASearchRunner(
+        LocalMarkdownIndex(tmp_path, chunk_chars=160),
+        qa_rule_reward_fn,
+        top_k=3,
+        answerability_rerank=True,
+        query_expansion=True,
+        evidence_reward_scale=1.0,
+        max_result_chars=500,
+    )
+
+
+def test_expected_answer_payload_uses_first_alternative_per_item():
+    assert expected_answer_payload("[fill] 数据总线/bus ||| 洁净室/cleanroom") == (
+        "fill",
+        "数据总线; 洁净室",
+    )
+
+
+def test_coldstart_builder_keeps_grounded_open_and_closed_replay(tmp_path):
+    rows = [
+        {
+            "query": "下面是一道填空题。\n题目：设备通过【1】连接洁净室",
+            "expected_answer": "[fill] 数据总线",
+        },
+        {
+            "query": "下面是一道填空题。\n题目：完全不存在的答案是【1】",
+            "expected_answer": "[fill] 神秘介质",
+        },
+        {
+            "query": "下面是一道单选题。\n题目：请选择\nA.甲\nB.乙",
+            "expected_answer": "[single] A",
+        },
+    ]
+
+    trajectories, stats = build_coldstart_trajectories(
+        rows,
+        _runner(tmp_path),
+        lambda query: "PROMPT:" + query,
+        target_open=1,
+        target_closed=1,
+        max_open_scan=2,
+        max_closed_scan=1,
+        seed=1,
+    )
+
+    assert len(trajectories) == 2
+    assert stats["selected_by_type"] == {"fill": 1, "single": 1}
+    grounded = next(row for row in trajectories if row["category"] == "open")
+    assert grounded["evidence_coverage"] == 1.0
+    assert grounded["messages"][1]["content"].startswith("<search>")
+    assert grounded["messages"][2]["role"] == "environment"
+    assert "\\boxed{数据总线}" in grounded["messages"][-1]["content"]
+
+
+def test_split_trajectories_never_crosses_group_key():
+    trajectories = [
+        {
+            "category": "open" if index < 4 else "closed",
+            "group_key": f"q-{index // 2}",
+            "messages": [],
+        }
+        for index in range(8)
+    ]
+
+    train, validation = split_trajectories(
+        trajectories,
+        validation_fraction=0.5,
+        seed=3,
+    )
+
+    train_keys = {row["group_key"] for row in train}
+    validation_keys = {row["group_key"] for row in validation}
+    assert train_keys.isdisjoint(validation_keys)
+    assert train and validation

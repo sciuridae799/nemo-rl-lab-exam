@@ -1,0 +1,108 @@
+# R4：从 F4 权重做极短正工具轨迹 SFT；首轮只验证数据和 weights-only 加载。
+defaults:
+  - ../../configs/base/sft.yaml
+  - ../../configs/models/qwen3.5-9b.yaml
+  - ../../configs/base/grpo_megatron.yaml
+  - ../../configs/base/grpo_lora.yaml
+
+policy:
+  model_name: "Qwen/Qwen3.5-9B-Base"
+  tokenizer:
+    name: "Qwen/Qwen3.5-9B-Base"
+    # 轨迹首条消息已按线上模板渲染；后续动作/环境回灌必须原样拼接。
+    chat_template: null
+    chat_template_kwargs: null
+  max_total_sequence_length: 4096
+  train_global_batch_size: 32
+  train_micro_batch_size: 2
+  megatron_cfg:
+    activation_checkpointing: false
+    optimizer:
+      lr: 5.0e-6
+      min_lr: 5.0e-7
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+    scheduler:
+      lr_decay_style: "constant"
+      lr_warmup_iters: 1
+      lr_decay_iters: 8
+
+sft:
+  max_num_epochs: 1
+  max_num_steps: 8
+  val_period: 4
+  val_batches: 2
+  val_global_batch_size: 32
+  val_micro_batch_size: 2
+  val_at_start: true
+  val_at_end: true
+  seed: 42
+
+checkpointing:
+  save_period: 4
+  save_optimizer: false
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 2
+
+data:
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 1
+  max_input_seq_length: 4096
+  data_dir: /data/datasets/qa_rl
+  system_prompt: |-
+    你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
+    检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
+    作答时，以 <answer> 开始、以 </answer> 结束；先写一句依据，再用 LaTeX \boxed 命令包裹本题真实答案。
+    最多检索两次；收到“必须作答”后不得继续检索。检索结果由环境返回，不得编造。
+    花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
+  seed: 42
+  validation_fraction: 0.10
+  # 首轮探针只构造 64 条左右并加载 F4，不执行 optimizer step。
+  target_open: 32
+  target_closed: 32
+  max_open_scan_per_type: 128
+  max_closed_scan_per_type: 32
+  min_open_trajectories: 8
+  weights_load_probe_only: true
+  resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400
+  resume_checkpoint_step: 30
+  # setup_data 前由 run.py 替换成当前 run 生成的 JSONL。
+  train:
+    dataset_name: openai_format
+    data_path: /tmp/qa-coldstart-train.jsonl
+    chat_key: messages
+    tool_key: null
+  validation:
+    dataset_name: openai_format
+    data_path: /tmp/qa-coldstart-validation.jsonl
+    chat_key: messages
+    tool_key: null
+  default:
+    processor: sft_processor
+
+retrieval:
+  docs_dir: /data/docs
+  chunk_chars: 480
+  top_k: 3
+  candidate_k: 80
+  candidate_max_per_source: 4
+  answerability_rerank: true
+  query_expansion: true
+  structural_expansion: false
+  max_searches: 2
+  max_result_chars: 1200
+  k1: 1.5
+  b: 0.75
+
+logger:
+  wandb_enabled: false
+  tensorboard_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+

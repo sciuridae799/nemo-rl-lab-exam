@@ -50,3 +50,15 @@ def test_seed_checkpoint_step_never_overwrites_existing_run(tmp_path):
 
     with pytest.raises(FileExistsError, match="拒绝覆盖"):
         seed_checkpoint_step(source, target, 30)
+
+
+def test_seed_checkpoint_step_can_renumber_copy_without_touching_source(tmp_path):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source_step = _make_checkpoint(source)
+
+    target_step = seed_checkpoint_step(source, target, 30, target_step=0)
+
+    assert target_step == target / "step_0"
+    assert (target_step / "policy" / "weights").is_dir()
+    assert source_step == source / "step_30"
