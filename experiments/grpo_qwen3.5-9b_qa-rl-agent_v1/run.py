@@ -100,6 +100,8 @@ class QAAgentDataset(Dataset):
                 "expected_answer": expected,
                 "query": query,
                 "searches": 0,
+                "must_answer": False,
+                "correction_used": False,
             },
             "loss_multiplier": 1.0,
             "idx": idx,

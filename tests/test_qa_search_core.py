@@ -66,21 +66,63 @@ def test_search_then_final_answer(runner):
     assert final_result.metadata is None
 
 
-def test_invalid_format_is_penalized(runner):
-    result = runner.process_turn(
+def test_invalid_format_gets_one_correction(runner):
+    correction = runner.process_turn(
         [{"role": "assistant", "content": "我不知道答案"}],
         {"query": "题目：测试", "expected_answer": "[single] A", "searches": 0},
+    )
+    assert correction.reward == 0.0
+    assert not correction.terminated
+    assert correction.metadata["must_answer"] is True
+    assert correction.metadata["correction_used"] is True
+
+    result = runner.process_turn(
+        [{"role": "assistant", "content": "仍然没有按格式作答"}],
+        correction.metadata,
     )
     assert result.reward == FORMAT_PENALTY
     assert result.terminated
 
 
 def test_search_limit_requires_final_answer(runner):
-    result = runner.process_turn(
+    correction = runner.process_turn(
         [{"role": "assistant", "content": "<search>继续搜索</search>"}],
         {"query": "题目：测试", "expected_answer": "[single] A", "searches": 2},
     )
+    assert correction.reward == 0.0
+    assert not correction.terminated
+    assert correction.metadata["correction_used"] is True
+
+    result = runner.process_turn(
+        [{"role": "assistant", "content": "<search>仍然搜索</search>"}],
+        correction.metadata,
+    )
     assert result.reward == FORMAT_PENALTY
+    assert result.terminated
+
+
+def test_last_search_requires_answer(runner):
+    result = runner.process_turn(
+        [{"role": "assistant", "content": "<search>继续搜索</search>"}],
+        {"query": "题目：测试", "expected_answer": "[single] A", "searches": 1},
+    )
+    assert not result.terminated
+    assert result.metadata["searches"] == 2
+    assert result.metadata["must_answer"] is True
+    assert "最后一次检索" in result.observation["content"]
+    assert "\\boxed{答案}" not in result.observation["content"]
+
+
+def test_format_correction_can_finish_with_boxed_answer(runner):
+    correction = runner.process_turn(
+        [{"role": "assistant", "content": "<answer>答案是 A</answer>"}],
+        {"query": "题目：测试", "expected_answer": "[single] A", "searches": 0},
+    )
+    result = runner.process_turn(
+        [{"role": "assistant", "content": "<answer>依据；\\boxed{A}</answer>"}],
+        correction.metadata,
+    )
+    assert result.reward == pytest.approx(1.0)
     assert result.terminated
 
 

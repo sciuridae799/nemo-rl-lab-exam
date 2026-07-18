@@ -13,25 +13,34 @@ policy:
     chat_template_kwargs:
       enable_thinking: false
   max_total_sequence_length: 4096
-  train_global_batch_size: 16
+  train_global_batch_size: 32
   generation_batch_size: 16
   generation:
     max_new_tokens: 1280
+    # Qwen non-thinking 官方推荐采样参数。
+    temperature: 0.7
+    top_p: 0.8
+    top_k: 20
 
 grpo:
-  num_prompts_per_step: 2
+  num_prompts_per_step: 4
   num_generations_per_prompt: 8
-  max_rollout_turns: 3
-  # 短周期正式训练，控制过拟合并保留再次修正的时间。
-  max_num_steps: 12
-  val_period: 3
+  max_rollout_turns: 4
+  # 官方 Agent 配方采用更大的 prompt 组；短跑 10 step 控制总时间。
+  max_num_steps: 10
+  val_period: 2
   val_at_start: true
   val_at_end: true
   max_val_samples: 64
   val_batch_size: 32
+  # 丢弃组内奖励完全相同、没有梯度信号的 prompt。
+  use_dynamic_sampling: true
+  dynamic_sampling_max_gen_batches: 10
 
 loss_fn:
   reference_policy_kl_penalty: 0.01
+  # DAPO Clip-Higher：给低概率探索动作更大的上升空间。
+  ratio_clip_max: 0.28
 
 data:
   shuffle: true
@@ -39,11 +48,11 @@ data:
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
   system_prompt: |-
-    你是技术培训考试检索 Agent。不要长篇思考，每轮只能选择一种动作：
-    1. 需要资料时，仅输出 <search>最关键的检索词</search>。
-    2. 能作答时，输出 <answer>简短依据；\boxed{最终答案}</answer>。
-    最多检索两次。检索结果由环境返回，不得编造检索结果。
-    最终答案必须严格遵守题目要求的字母、逗号或分号格式，并且必须放入 \boxed{}。
+    你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
+    检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
+    作答时，以 <answer> 开始、以 </answer> 结束；先写一句依据，再用 LaTeX \boxed 命令包裹本题真实答案。
+    最多检索两次；收到“必须作答”后不得继续检索。检索结果由环境返回，不得编造。
+    花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
 
 env:
   _override_: true
@@ -56,7 +65,7 @@ env:
       max_result_chars: 1200
       k1: 1.5
       b: 0.75
-      use_judge: false
+      use_judge: true
 
 logger:
   wandb_enabled: false

@@ -252,12 +252,29 @@ class QASearchRunner:
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
 
-    def _format_hits(self, search_query: str, hits: list[SearchHit]) -> str:
+    def _next_action_hint(self, must_answer: bool) -> str:
+        if must_answer:
+            return (
+                "已完成最后一次检索。下一轮不得再检索，必须直接给出最终答案；"
+                "使用 answer XML 元素，并用 \\boxed 命令包裹本题真实答案。"
+            )
+        return (
+            "还可检索一次；若已有依据，请直接给出最终答案。"
+            "最终答案必须使用 answer XML 元素和 \\boxed 命令，禁止填写占位词。"
+        )
+
+    def _format_hits(
+        self,
+        search_query: str,
+        hits: list[SearchHit],
+        *,
+        must_answer: bool,
+    ) -> str:
         if not hits:
             return (
                 f"<search_results query=\"{_safe_label(search_query)}\">\n"
                 "未找到匹配内容。\n</search_results>\n"
-                "请换关键词检索，或直接用 <answer>...\\boxed{答案}</answer> 作答。"
+                f"{self._next_action_hint(must_answer)}"
             )
 
         parts = [f"<search_results query=\"{_safe_label(search_query)}\">"]
@@ -270,11 +287,44 @@ class QASearchRunner:
             body = hit.text[:remaining]
             parts.append(prefix + body)
             used += len(body)
-        parts.append(
-            "\n</search_results>\n"
-            "请继续检索，或直接用 <answer>...\\boxed{答案}</answer> 作答。"
-        )
+        parts.append("\n</search_results>\n" + self._next_action_hint(must_answer))
         return "".join(parts)
+
+    def _request_final_answer(
+        self,
+        metadata: dict[str, Any],
+        expected: str,
+    ) -> TurnResult:
+        if bool(metadata.get("correction_used", False)):
+            return TurnResult(
+                observation={
+                    "role": "environment",
+                    "content": "最终答案格式仍不合格，轨迹结束。",
+                },
+                reward=FORMAT_PENALTY,
+                terminated=True,
+                next_stop_strings=None,
+                metadata=None,
+                answer=expected,
+            )
+
+        next_metadata = dict(metadata)
+        next_metadata["must_answer"] = True
+        next_metadata["correction_used"] = True
+        return TurnResult(
+            observation={
+                "role": "environment",
+                "content": (
+                    "你还有最后一次格式纠正机会。不得继续检索或复述规则；"
+                    "只输出一个 answer XML 元素，并用 \\boxed 命令包裹本题真实答案。"
+                ),
+            },
+            reward=0.0,
+            terminated=False,
+            next_stop_strings=list(STOP_STRINGS),
+            metadata=next_metadata,
+            answer=None,
+        )
 
     def process_turn(
         self,
@@ -301,18 +351,8 @@ class QASearchRunner:
         match = _SEARCH.search(assistant_text)
         if match:
             searches = int(metadata.get("searches", 0))
-            if searches >= self.max_searches:
-                return TurnResult(
-                    observation={
-                        "role": "environment",
-                        "content": "检索次数已用完，但没有给出 \\boxed{} 最终答案。",
-                    },
-                    reward=FORMAT_PENALTY,
-                    terminated=True,
-                    next_stop_strings=None,
-                    metadata=None,
-                    answer=expected,
-                )
+            if bool(metadata.get("must_answer", False)) or searches >= self.max_searches:
+                return self._request_final_answer(metadata, expected)
 
             search_query = match.group(1).strip()
             if not search_query:
@@ -321,10 +361,15 @@ class QASearchRunner:
             hits = self.index.search(retrieval_query, top_k=self.top_k)
             next_metadata = dict(metadata)
             next_metadata["searches"] = searches + 1
+            next_metadata["must_answer"] = searches + 1 >= self.max_searches
             return TurnResult(
                 observation={
                     "role": "environment",
-                    "content": self._format_hits(search_query, hits),
+                    "content": self._format_hits(
+                        search_query,
+                        hits,
+                        must_answer=next_metadata["must_answer"],
+                    ),
                 },
                 reward=0.0,
                 terminated=False,
@@ -333,17 +378,4 @@ class QASearchRunner:
                 answer=None,
             )
 
-        return TurnResult(
-            observation={
-                "role": "environment",
-                "content": (
-                    "格式错误：本轮必须输出 <search>关键词</search>，"
-                    "或输出含 \\boxed{} 的最终答案。"
-                ),
-            },
-            reward=FORMAT_PENALTY,
-            terminated=True,
-            next_stop_strings=None,
-            metadata=None,
-            answer=expected,
-        )
+        return self._request_final_answer(metadata, expected)
