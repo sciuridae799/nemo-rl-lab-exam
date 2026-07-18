@@ -19,6 +19,7 @@ _ASCII_TOKEN = re.compile(r"[a-z0-9][a-z0-9_.+-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 _SEARCH = re.compile(r"<search>\s*(.*?)\s*</search>", re.IGNORECASE | re.DOTALL)
+_ASCII_SPLIT = re.compile(r"[^a-z0-9]+")
 _BLANK_MARKER = re.compile(r"【\s*\d+\s*】|\[\s*\d+\s*]|_{2,}|＿{2,}|\(\s*\)|（\s*）")
 _EXAM_CUE = re.compile(
     r"填空题|选择题|判断题|简答题|每题\s*\d*\s*分|^\s*\d+[.、)]",
@@ -84,10 +85,18 @@ def _normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", str(text)).lower()
 
 
-def _terms(text: str) -> list[str]:
+def _terms(text: str, *, expand_ascii: bool = False) -> list[str]:
     """英文按词、中文按二元组切分，兼顾缩写和中文术语。"""
     normalized = _normalize(text)
-    terms = _ASCII_TOKEN.findall(normalized)
+    terms: list[str] = []
+    for token in _ASCII_TOKEN.findall(normalized):
+        terms.append(token)
+        if expand_ascii:
+            terms.extend(
+                piece
+                for piece in _ASCII_SPLIT.split(token)
+                if len(piece) >= 2 or any(char.isdigit() for char in piece)
+            )
     for run in _CJK_RUN.findall(normalized):
         if len(run) == 1:
             terms.append(run)
@@ -184,6 +193,29 @@ def _best_answer_sentence_score(question: str, text: str) -> float:
     return best
 
 
+def _answerability_strength(question: str, hit: SearchHit) -> float:
+    bridge = _cloze_bridge_signal(question, hit.text)
+    source = hit.source + "\n" + hit.text
+    source_answer_cue = bool(
+        re.search(
+            r"参考答案|答案|answer|solution|manual|training",
+            hit.source,
+            re.IGNORECASE,
+        )
+    )
+    source_exam_cue = bool(
+        re.search(r"试卷|试题|题库|exam|quiz", hit.source, re.IGNORECASE)
+    )
+    return (
+        _best_answer_sentence_score(question, hit.text)
+        + 0.8 * max(0.0, bridge)
+        + 0.12 * float(source_answer_cue)
+        - 0.25 * float(source_exam_cue)
+        - 0.8 * question_copy_score(question, hit.text)
+        + 0.05 * float(_ANSWER_CUE.search(source) is not None)
+    )
+
+
 def _content_similarity(left: str, right: str) -> float:
     left_terms = set(_terms(left))
     right_terms = set(_terms(right))
@@ -196,6 +228,7 @@ def rerank_answerable_hits(
     hits: list[SearchHit],
     *,
     top_k: int,
+    baseline_hits: list[SearchHit] | None = None,
 ) -> list[SearchHit]:
     """在少量 BM25 候选中优先选择可回答、非重复的证据片段。"""
     if not hits:
@@ -226,6 +259,16 @@ def rerank_answerable_hits(
         sentence_score = _best_answer_sentence_score(question, hit.text)
         bridge = _cloze_bridge_signal(question, hit.text)
         copy_score = question_copy_score(question, hit.text)
+        source_answer_cue = bool(
+            re.search(
+                r"参考答案|答案|answer|solution|manual|training",
+                hit.source,
+                re.IGNORECASE,
+            )
+        )
+        source_exam_cue = bool(
+            re.search(r"试卷|试题|题库|exam|quiz", hit.source, re.IGNORECASE)
+        )
         score = (
             0.35 * bm25
             + 0.20 * coverage
@@ -234,6 +277,8 @@ def rerank_answerable_hits(
             + 0.10 * answer_cue
             + 0.05 * value_bonus
             + 0.75 * max(0.0, bridge)
+            + 0.08 * float(source_answer_cue)
+            - 0.10 * float(source_exam_cue and copy_score >= 0.5)
             - 0.80 * copy_score
             - 0.25 * max(0.0, -bridge)
         )
@@ -256,6 +301,24 @@ def rerank_answerable_hits(
         )
         _, _, best_hit = remaining.pop(best_index)
         selected.append(best_hit)
+
+    if baseline_hits and selected:
+        baseline = baseline_hits[0]
+        baseline_key = (baseline.source, baseline.text)
+        selected_keys = {(hit.source, hit.text) for hit in selected}
+        best_candidate = selected[0]
+        can_promote = (
+            _cloze_bridge_signal(question, best_candidate.text) > 0.5
+            or _answerability_strength(question, best_candidate)
+            >= _answerability_strength(question, baseline) + 0.25
+        )
+        if baseline_key not in selected_keys and not can_promote:
+            selected = [baseline] + [
+                hit
+                for hit in selected
+                if (hit.source, hit.text) != baseline_key
+            ]
+            selected = selected[: max(1, int(top_k))]
     return selected
 
 
@@ -308,11 +371,13 @@ class LocalMarkdownIndex:
         chunk_chars: int = 480,
         k1: float = 1.5,
         b: float = 0.75,
+        expand_ascii_tokens: bool = False,
     ):
         self.docs_dir = Path(docs_dir)
         self.chunk_chars = max(160, int(chunk_chars))
         self.k1 = float(k1)
         self.b = float(b)
+        self.expand_ascii_tokens = bool(expand_ascii_tokens)
         self.chunks = self._load_chunks()
         if not self.chunks:
             raise ValueError(f"未在 {self.docs_dir} 找到可索引的 Markdown 内容")
@@ -357,7 +422,12 @@ class LocalMarkdownIndex:
         document_frequency: Counter[str] = Counter()
 
         for doc_id, chunk in enumerate(self.chunks):
-            counts = Counter(_terms(chunk.source + "\n" + chunk.text))
+            counts = Counter(
+                _terms(
+                    chunk.source + "\n" + chunk.text,
+                    expand_ascii=self.expand_ascii_tokens,
+                )
+            )
             self.doc_lengths.append(sum(counts.values()))
             for term, count in counts.items():
                 self.postings[term].append((doc_id, count))
@@ -369,6 +439,14 @@ class LocalMarkdownIndex:
             term: math.log(1.0 + (size - freq + 0.5) / (freq + 0.5))
             for term, freq in document_frequency.items()
         }
+        prefix_terms: dict[str, list[tuple[float, str]]] = defaultdict(list)
+        for term, idf in self.idf.items():
+            if len(term) >= 4 and re.fullmatch(r"[a-z0-9]+", term):
+                prefix_terms[term[:4]].append((idf, term))
+        self.prefix_terms = {
+            prefix: [term for _, term in sorted(values, reverse=True)[:8]]
+            for prefix, values in prefix_terms.items()
+        }
 
     def search(
         self,
@@ -378,10 +456,24 @@ class LocalMarkdownIndex:
         max_per_source: int = 2,
         candidate_k: int | None = None,
         rerank_question: str | None = None,
+        preserve_top_hit: bool = False,
     ) -> list[SearchHit]:
-        query_counts = Counter(_terms(query))
+        query_counts = Counter(
+            _terms(query, expand_ascii=self.expand_ascii_tokens)
+        )
         scores: dict[int, float] = defaultdict(float)
+        weighted_terms: list[tuple[str, float]] = []
         for term, query_tf in query_counts.items():
+            weighted_terms.append((term, float(query_tf)))
+            if self.expand_ascii_tokens and len(term) >= 4 and re.fullmatch(
+                r"[a-z0-9]+", term
+            ):
+                weighted_terms.extend(
+                    (alias, float(query_tf) * 0.2)
+                    for alias in self.prefix_terms.get(term[:4], [])
+                    if alias != term
+                )
+        for term, query_tf in weighted_terms:
             idf = self.idf.get(term)
             if idf is None:
                 continue
@@ -417,8 +509,40 @@ class LocalMarkdownIndex:
             for score, _, doc_id in selected
         ]
         if rerank_question:
-            return rerank_answerable_hits(rerank_question, hits, top_k=top_k)
+            return rerank_answerable_hits(
+                rerank_question,
+                hits,
+                top_k=top_k,
+                baseline_hits=hits[:1] if preserve_top_hit else None,
+            )
         return hits[: max(1, int(top_k))]
+
+    def search_union(
+        self,
+        queries: list[str],
+        *,
+        candidate_k: int = 20,
+        max_per_source: int = 2,
+    ) -> list[SearchHit]:
+        """合并多个题干视角的 BM25 候选，供后续可回答性重排。"""
+        merged: dict[tuple[str, str], SearchHit] = {}
+        for query in queries:
+            if not str(query).strip():
+                continue
+            for hit in self.search(
+                query,
+                top_k=candidate_k,
+                max_per_source=max_per_source,
+            ):
+                key = (hit.source, hit.text)
+                previous = merged.get(key)
+                if previous is None or hit.score > previous.score:
+                    merged[key] = hit
+        return sorted(
+            merged.values(),
+            key=lambda hit: hit.score,
+            reverse=True,
+        )[: max(1, int(candidate_k)) * max(1, len(queries))]
 
 
 def _last_assistant_text(message_log: list[dict[str, Any]]) -> str:
@@ -431,6 +555,43 @@ def _last_assistant_text(message_log: list[dict[str, Any]]) -> str:
 def _question_text(query: str) -> str:
     match = re.search(r"题目[:：]\s*(.*?)(?:\n\s*\n选项[:：]|\Z)", query, re.DOTALL)
     return match.group(1).strip() if match else query.strip()
+
+
+def build_query_variants(question: str, search_query: str = "") -> list[str]:
+    """从题干构造少量通用检索视角，不引入答案或题目特例。"""
+    question = str(question).strip()
+    variants: list[str] = []
+    if search_query.strip():
+        variants.append(search_query.strip() + "\n" + question)
+    variants.append(question)
+
+    ascii_tokens: list[str] = []
+    for token in _ASCII_TOKEN.findall(_normalize(question)):
+        pieces = [piece for piece in _ASCII_SPLIT.split(token) if piece]
+        ascii_tokens.extend(pieces or [token])
+    ascii_tokens = list(
+        dict.fromkeys(token for token in ascii_tokens if len(token) >= 2)
+    )
+    if ascii_tokens:
+        variants.append(" ".join(ascii_tokens))
+
+    blank_parts = [part.strip() for part in _BLANK_MARKER.split(question)]
+    variants.extend(part for part in blank_parts if len(compact_text(part)) >= 4)
+
+    for run in _CJK_RUN.findall(question):
+        if len(run) <= 12:
+            variants.append(run)
+        else:
+            variants.extend(run[start : start + 8] for start in range(0, len(run), 6))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for variant in variants:
+        key = compact_text(variant)
+        if len(key) >= 3 and key not in seen:
+            seen.add(key)
+            unique.append(variant)
+    return unique[:8]
 
 
 def _safe_label(text: str) -> str:
@@ -499,6 +660,7 @@ class QASearchRunner:
         top_k: int = 3,
         candidate_k: int = 20,
         answerability_rerank: bool = False,
+        query_expansion: bool = False,
         max_searches: int = 2,
         max_result_chars: int = 1500,
     ):
@@ -507,6 +669,7 @@ class QASearchRunner:
         self.top_k = max(1, int(top_k))
         self.candidate_k = max(self.top_k, int(candidate_k))
         self.answerability_rerank = bool(answerability_rerank)
+        self.query_expansion = bool(query_expansion)
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
 
@@ -622,12 +785,25 @@ class QASearchRunner:
                 if self.answerability_rerank and qa_type_from_text(original_query) in {"fill", "short"}
                 else None
             )
-            hits = self.index.search(
-                retrieval_query,
-                top_k=self.top_k,
-                candidate_k=self.candidate_k if rerank_question else self.top_k,
-                rerank_question=rerank_question,
-            )
+            baseline_hits = self.index.search(retrieval_query, top_k=self.top_k)
+            if rerank_question:
+                queries = (
+                    build_query_variants(question, search_query)
+                    if self.query_expansion
+                    else [retrieval_query]
+                )
+                candidate_hits = self.index.search_union(
+                    queries,
+                    candidate_k=self.candidate_k,
+                )
+                hits = rerank_answerable_hits(
+                    question,
+                    candidate_hits,
+                    top_k=self.top_k,
+                    baseline_hits=baseline_hits,
+                )
+            else:
+                hits = baseline_hits
             next_metadata = dict(metadata)
             next_metadata["searches"] = searches + 1
             next_metadata["must_answer"] = searches + 1 >= self.max_searches

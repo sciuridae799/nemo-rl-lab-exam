@@ -27,6 +27,7 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             chunk_chars=int(cfg.get("chunk_chars", 480)),
             k1=float(cfg.get("k1", 1.5)),
             b=float(cfg.get("b", 0.75)),
+            expand_ascii_tokens=bool(cfg.get("expand_ascii_tokens", False)),
         )
         if bool(cfg.get("use_judge", True)):
             from common.rewards.qa_judge_reward import (
@@ -48,6 +49,7 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             top_k=int(cfg.get("top_k", 3)),
             candidate_k=int(cfg.get("candidate_k", 20)),
             answerability_rerank=bool(cfg.get("answerability_rerank", False)),
+            query_expansion=bool(cfg.get("query_expansion", False)),
             max_searches=int(cfg.get("max_searches", 2)),
             max_result_chars=int(cfg.get("max_result_chars", 1500)),
         )

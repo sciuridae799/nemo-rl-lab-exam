@@ -12,8 +12,10 @@ from common.environments.qa_search_core import (
     LocalMarkdownIndex,
     SearchHit,
     _question_text,
+    build_query_variants,
     compact_text,
     question_copy_score,
+    rerank_answerable_hits,
 )
 
 _EXPECTED = re.compile(r"\s*\[(\w+)]\s*(.*)", re.DOTALL)
@@ -77,6 +79,7 @@ def evaluate_retrieval_ab(
     seed: int = 42,
     top_k: int = 3,
     candidate_k: int = 20,
+    query_expansion: bool = False,
 ) -> dict[str, Any]:
     """在训练集开放题上比较原始 BM25 与可回答性重排。"""
     grouped: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
@@ -104,11 +107,20 @@ def evaluate_retrieval_ab(
         expected = str(row[output_key])
         question = _question_text(query)
         baseline_hits = index.search(question, top_k=top_k)
-        reranked_hits = index.search(
-            question,
-            top_k=top_k,
+        candidate_queries = (
+            build_query_variants(question)
+            if query_expansion
+            else [question]
+        )
+        candidate_hits = index.search_union(
+            candidate_queries,
             candidate_k=candidate_k,
-            rerank_question=question,
+        )
+        reranked_hits = rerank_answerable_hits(
+            question,
+            candidate_hits,
+            top_k=top_k,
+            baseline_hits=baseline_hits[:1],
         )
         baseline = _retrieval_stats(question, expected, baseline_hits)
         reranked = _retrieval_stats(question, expected, reranked_hits)
@@ -141,6 +153,7 @@ def evaluate_retrieval_ab(
         "seed": int(seed),
         "top_k": int(top_k),
         "candidate_k": int(candidate_k),
+        "query_expansion": bool(query_expansion),
         "baseline": baseline_summary,
         "reranked": reranked_summary,
         "delta": {key: reranked_summary[key] - baseline_summary[key] for key in baseline_summary},

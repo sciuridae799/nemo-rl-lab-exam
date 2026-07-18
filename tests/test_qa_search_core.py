@@ -8,6 +8,7 @@ from common.environments.qa_search_core import (
     LocalMarkdownIndex,
     QASearchRunner,
     SearchHit,
+    build_query_variants,
     qa_reward_diagnostics,
     qa_type_from_text,
     question_copy_score,
@@ -198,3 +199,19 @@ def test_answerability_rerank_prefers_filled_evidence_over_blank_exam():
     assert question_copy_score(question, blank_exam.text) == 1.0
     assert question_copy_score(question, answer_manual.text) == 0.0
     assert ranked[0].source == "操作手册.md"
+
+
+def test_query_variants_split_ascii_and_cloze_context():
+    variants = build_query_variants("GC-MS 在【1】进行检测", "GC-MS 检测")
+    assert any("GC" in variant and "MS" in variant for variant in variants)
+    assert any("进行检测" in variant for variant in variants)
+
+
+def test_ascii_prefix_expansion_recovers_morphological_match(tmp_path):
+    (tmp_path / "litho.md").write_text(
+        "# Lithography\n\nLithography processing follows the standard process flow.",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, expand_ascii_tokens=True)
+    hits = index.search("litho process", top_k=1)
+    assert hits and hits[0].source == "litho.md"
