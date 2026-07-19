@@ -57,9 +57,8 @@ data:
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
   runtime_capability_probe: false
-  # 只读评估训练集检索，不初始化 Qwen 或更新权重。
-  retrieval_diagnostic: true
-  retrieval_diagnostic_max_per_type: 64
+  retrieval_diagnostic: false
+  retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
   open_loss_multiplier: 1.0
   train_question_types: []
@@ -89,10 +88,8 @@ env:
       candidate_max_per_source: 4
       answerability_rerank: true
       query_expansion: true
-      # 与正轨迹 SFT 的可复现检索观察保持一致。
-      structural_expansion: true
-      # 新增的试卷/答案文档序号对齐候选，只在离线门控通过后启用于正式。
-      aligned_sibling_expansion: true
+      structural_expansion: false
+      aligned_sibling_expansion: false
       expand_ascii_tokens: false
       max_searches: 2
       max_result_chars: 1200
