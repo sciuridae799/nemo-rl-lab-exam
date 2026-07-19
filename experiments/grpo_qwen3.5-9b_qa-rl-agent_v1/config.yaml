@@ -102,13 +102,15 @@ env:
       max_searches: 2
       max_result_chars: 1200
       evidence_reward_scale: 0.0
-      # 仅用训练集中的相似判断/多选题补充上下文；不读取验证答案。
+      # 仅用训练集中的相似题生成额外检索视角；不把训练答案直接放进上下文。
       qa_memory_enabled: true
       qa_memory_path: /data/datasets/qa_rl/train.jsonl
-      qa_memory_question_types: [multiple, bool]
-      qa_memory_top_k: 5
-      qa_memory_min_similarity: 0.15
+      qa_memory_question_types: [single, multiple, bool, fill, short]
+      qa_memory_top_k: 3
+      qa_memory_min_similarity: 0.25
       qa_memory_max_chars: 900
+      qa_memory_query_expansion: true
+      qa_memory_context: false
       k1: 1.5
       b: 0.75
       use_judge: true

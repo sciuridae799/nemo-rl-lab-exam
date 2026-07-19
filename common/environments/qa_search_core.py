@@ -999,6 +999,8 @@ class QASearchRunner:
         qa_memory_top_k: int = 5,
         qa_memory_min_similarity: float = 0.15,
         qa_memory_max_chars: int = 900,
+        qa_memory_query_expansion: bool = False,
+        qa_memory_context: bool = True,
     ):
         self.index = index
         self.reward_fn = reward_fn
@@ -1016,6 +1018,8 @@ class QASearchRunner:
         self.qa_memory_top_k = max(1, int(qa_memory_top_k))
         self.qa_memory_min_similarity = max(0.0, float(qa_memory_min_similarity))
         self.qa_memory_max_chars = max(200, int(qa_memory_max_chars))
+        self.qa_memory_query_expansion = bool(qa_memory_query_expansion)
+        self.qa_memory_context = bool(qa_memory_context)
 
     def _next_action_hint(self, must_answer: bool) -> str:
         if must_answer:
@@ -1160,12 +1164,28 @@ class QASearchRunner:
                 else None
             )
             baseline_hits = self.index.search(retrieval_query, top_k=self.top_k)
+            memory_hits = (
+                self.qa_memory.search(
+                    original_query,
+                    top_k=self.qa_memory_top_k,
+                    min_similarity=self.qa_memory_min_similarity,
+                )
+                if self.qa_memory is not None
+                else []
+            )
+            memory_queries = (
+                [hit.question for hit in memory_hits]
+                if self.qa_memory_query_expansion
+                else []
+            )
             if rerank_question:
                 queries = (
                     build_query_variants(question, search_query)
                     if self.query_expansion
                     else [retrieval_query]
                 )
+                queries.extend(memory_queries)
+                queries = list(dict.fromkeys(query for query in queries if query.strip()))
                 candidate_hits = self.index.search_union(
                     queries,
                     candidate_k=self.candidate_k,
@@ -1183,17 +1203,25 @@ class QASearchRunner:
                     top_k=self.top_k,
                     baseline_hits=baseline_hits,
                 )
+            elif memory_queries:
+                memory_candidates = self.index.search_union(
+                    [retrieval_query, *memory_queries],
+                    candidate_k=self.candidate_k,
+                    max_per_source=self.candidate_max_per_source,
+                )
+                merged_hits: list[SearchHit] = []
+                seen_hits: set[tuple[str, str]] = set()
+                for hit in [*baseline_hits[:1], *memory_candidates, *baseline_hits[1:]]:
+                    key = (hit.source, hit.text)
+                    if key in seen_hits:
+                        continue
+                    seen_hits.add(key)
+                    merged_hits.append(hit)
+                    if len(merged_hits) >= self.top_k:
+                        break
+                hits = merged_hits
             else:
                 hits = baseline_hits
-            memory_hits = (
-                self.qa_memory.search(
-                    original_query,
-                    top_k=self.qa_memory_top_k,
-                    min_similarity=self.qa_memory_min_similarity,
-                )
-                if self.qa_memory is not None
-                else []
-            )
             next_metadata = dict(metadata)
             next_metadata["searches"] = searches + 1
             next_metadata["must_answer"] = searches + 1 >= self.max_searches
@@ -1218,7 +1246,7 @@ class QASearchRunner:
                         search_query,
                         hits,
                         must_answer=next_metadata["must_answer"],
-                        memory_hits=memory_hits,
+                        memory_hits=memory_hits if self.qa_memory_context else [],
                     ),
                 },
                 reward=0.0,

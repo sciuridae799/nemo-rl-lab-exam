@@ -77,6 +77,10 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
                 cfg.get("qa_memory_min_similarity", 0.15)
             ),
             qa_memory_max_chars=int(cfg.get("qa_memory_max_chars", 900)),
+            qa_memory_query_expansion=bool(
+                cfg.get("qa_memory_query_expansion", False)
+            ),
+            qa_memory_context=bool(cfg.get("qa_memory_context", True)),
         )
         print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")
         print(
@@ -89,6 +93,8 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
                 f"types={cfg.get('qa_memory_question_types', ['multiple', 'bool'])}；"
                 f"top_k={self.runner.qa_memory_top_k}；"
                 f"min_similarity={self.runner.qa_memory_min_similarity:.3f}"
+                f"；query_expansion={self.runner.qa_memory_query_expansion}"
+                f"；context={self.runner.qa_memory_context}"
             )
 
     def step(
