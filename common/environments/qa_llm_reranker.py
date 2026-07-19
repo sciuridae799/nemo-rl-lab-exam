@@ -107,14 +107,28 @@ class QwenCandidateReranker:
         )
 
     def _generate(self, prompt: str, *, max_new_tokens: int) -> str:
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            }
-        ]
+        return self.generate_messages(
+            [{"role": "user", "content": prompt}],
+            max_new_tokens=max_new_tokens,
+        )
+
+    def generate_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_new_tokens: int,
+    ) -> str:
+        """按真实 chat role 生成，供多轮教师诊断复用。"""
+        normalized_messages: list[dict[str, Any]] = []
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            normalized_messages.append(
+                {"role": str(message.get("role", "user")), "content": content}
+            )
         inputs = self.processor.apply_chat_template(
-            messages,
+            normalized_messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,

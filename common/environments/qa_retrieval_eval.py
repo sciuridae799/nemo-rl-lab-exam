@@ -197,8 +197,9 @@ def evaluate_llm_teacher_agent(
 
     system_prompt = (
         "你是技术培训考试问答 Agent。只能依据题干和检索资料作答，不要编造或凭常识补全。"
-        "需要资料时只输出一个 <search>关键词</search> 动作；拿到资料后，最终只输出"
-        "<answer>简短依据；\\boxed{答案}</answer>。严格按题目要求填写字母、逗号或分号。"
+        "每次只能输出一个完整动作：需要资料时只输出 <search>关键词</search>；"
+        "最终作答时只输出 <answer>简短依据；\\boxed{答案}</answer>。"
+        "严格按题目要求填写字母、逗号或分号，不要输出思考过程。"
     )
     completions: list[str] = []
     questions: list[str] = []
@@ -210,19 +211,25 @@ def evaluate_llm_teacher_agent(
         query = str(row[input_key])
         question = _question_text(query)
         expected = str(row[output_key])
-        history: list[str] = [f"系统：{system_prompt}", f"题目：{question}"]
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "题目：" + question},
+        ]
         final_text = ""
         searches = 0
         try:
             while searches <= max(0, int(max_searches)):
                 force_answer = searches >= max(0, int(max_searches))
                 if force_answer:
-                    history.append(
-                        "现在只输出最终 <answer>，必须包含 \\boxed{}，不要输出 <search>。"
-                    )
-                prompt = "\n\n".join(history)
+                    messages.append({
+                        "role": "user",
+                        "content": "现在只输出最终 <answer>，必须包含 \\boxed{}，不要输出 <search>。",
+                    })
                 generated = str(
-                    teacher._generate(prompt, max_new_tokens=192 if force_answer else 64)
+                    teacher.generate_messages(
+                        messages,
+                        max_new_tokens=192 if force_answer else 64,
+                    )
                 ).strip()
                 final_match = _TEACHER_ANSWER.search(generated)
                 search_match = _TEACHER_SEARCH.search(generated)
@@ -230,11 +237,16 @@ def evaluate_llm_teacher_agent(
                     final_text = generated
                     break
                 if not search_match or force_answer:
-                    history.append("助手：" + generated)
-                    history.append(
-                        "格式不完整。现在只输出最终 <answer>，必须包含 \\boxed{}，不要解释。"
-                    )
-                    generated = str(teacher._generate("\n\n".join(history), max_new_tokens=192)).strip()
+                    messages.extend([
+                        {"role": "assistant", "content": generated},
+                        {
+                            "role": "user",
+                            "content": "格式不完整。现在只输出最终 <answer>，必须包含 \\boxed{}，不要解释。",
+                        },
+                    ])
+                    generated = str(
+                        teacher.generate_messages(messages, max_new_tokens=192)
+                    ).strip()
                     final_text = generated
                     break
 
@@ -263,18 +275,19 @@ def evaluate_llm_teacher_agent(
                     baseline_hits=baseline_hits,
                 )
                 searches += 1
-                history.extend(
-                    [
-                        "助手：<search>" + search_query + "</search>",
-                        "环境：" + _teacher_observation(
+                messages.extend([
+                    {"role": "assistant", "content": generated},
+                    {
+                        "role": "user",
+                        "content": _teacher_observation(
                             question,
                             search_query,
                             hits,
                             max_chars=max_result_chars,
                             must_answer=searches >= max(0, int(max_searches)),
                         ),
-                    ]
-                )
+                    },
+                ])
         except Exception:
             errors += 1
             final_text = ""
