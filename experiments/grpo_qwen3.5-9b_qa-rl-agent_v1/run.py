@@ -45,6 +45,7 @@ from nemo_rl.utils.config import (
 from nemo_rl.utils.logger import get_next_experiment_dir
 
 from common.environments.qa_retrieval_eval import (
+    evaluate_answerability_weight_grid,
     evaluate_retrieval_ab,
     evaluate_supervised_query_expansion,
 )
@@ -252,6 +253,24 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
         expand_ascii_tokens=bool(env_cfg.get("expand_ascii_tokens", False)),
     )
     train_rows = _read_jsonl(os.path.join(data_dir, "train.jsonl"))
+    if bool(data_cfg.get("weight_grid_diagnostic", False)):
+        report = evaluate_answerability_weight_grid(
+            train_rows,
+            index,
+            input_key=str(data_cfg.get("input_key", "query")),
+            output_key=str(data_cfg.get("output_key", "expected_answer")),
+            max_per_type=int(data_cfg.get("retrieval_diagnostic_max_per_type", 32)),
+            seed=int(data_cfg.get("retrieval_diagnostic_seed", config.grpo["seed"])),
+            top_k=int(env_cfg.get("top_k", 3)),
+            candidate_k=int(env_cfg.get("candidate_k", 80)),
+            candidate_max_per_source=int(env_cfg.get("candidate_max_per_source", 4)),
+            query_expansion=bool(env_cfg.get("query_expansion", True)),
+            structural_expansion=bool(env_cfg.get("structural_expansion", False)),
+            aligned_sibling_expansion=bool(env_cfg.get("aligned_sibling_expansion", False)),
+        )
+        print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")
+        print("可回答性权重网格：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
     if bool(data_cfg.get("supervised_query_diagnostic", False)):
         report = evaluate_supervised_query_expansion(
             train_rows,

@@ -436,18 +436,22 @@ def rerank_answerable_hits(
     *,
     top_k: int,
     baseline_hits: list[SearchHit] | None = None,
+    weights: tuple[float, ...] | None = None,
 ) -> list[SearchHit]:
     """在少量 BM25 候选中优先选择可回答、非重复的证据片段。"""
     if not hits:
         return []
 
+    active_weights = tuple(weights or _ANSWERABILITY_DEFAULT_WEIGHTS)
+    if len(active_weights) != len(ANSWERABILITY_FEATURE_NAMES):
+        raise ValueError("answerability weights 长度与特征不一致")
     scored: list[tuple[float, int, SearchHit]] = []
     feature_rows = answerability_feature_rows(question, hits)
     for position, (hit, features) in enumerate(zip(hits, feature_rows, strict=True)):
         score = sum(
             weight * value
             for weight, value in zip(
-                _ANSWERABILITY_DEFAULT_WEIGHTS,
+                active_weights,
                 features,
                 strict=True,
             )

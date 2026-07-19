@@ -313,6 +313,16 @@ def test_answerability_rerank_prefers_filled_evidence_over_blank_exam():
     assert ranked[0].source == "操作手册.md"
 
 
+def test_answerability_rerank_rejects_wrong_weight_width():
+    with pytest.raises(ValueError, match="weights"):
+        rerank_answerable_hits(
+            "设备如何连接",
+            [SearchHit("manual.md", "设备通过总线连接。", 1.0)],
+            top_k=1,
+            weights=(1.0,),
+        )
+
+
 def test_answerability_features_are_gold_free_and_fixed_width():
     rows = answerability_feature_rows(
         "设备通过【1】连接洁净室",

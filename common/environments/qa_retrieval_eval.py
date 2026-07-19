@@ -316,6 +316,120 @@ def evaluate_supervised_query_expansion(
     }
 
 
+_ANSWERABILITY_WEIGHT_GRID: dict[str, tuple[float, ...]] = {
+    "default": (
+        0.35, 0.20, 0.10, 0.20, 0.10, 0.05, 0.75, 0.08, -0.10, -0.80, -0.25
+    ),
+    # 通用角色识别：对答案/讲义文档加权，同时保留句子与填空桥接信号。
+    "answer_role": (
+        0.15, 0.10, 0.05, 0.45, 0.20, 0.05, 1.00, 0.65, -0.20, -1.20, -0.30
+    ),
+    "answer_role_strict": (
+        0.10, 0.05, 0.02, 0.60, 0.25, 0.05, 1.20, 1.00, -0.35, -1.50, -0.40
+    ),
+    # 保守版：只略微提高证据句，用于检查是否是过强答案角色所致退化。
+    "answer_role_soft": (
+        0.25, 0.15, 0.08, 0.30, 0.15, 0.05, 0.85, 0.30, -0.15, -1.00, -0.25
+    ),
+}
+
+
+def evaluate_answerability_weight_grid(
+    rows: list[dict[str, Any]],
+    index: LocalMarkdownIndex,
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    max_per_type: int = 32,
+    seed: int = 42,
+    top_k: int = 3,
+    candidate_k: int = 80,
+    candidate_max_per_source: int = 4,
+    query_expansion: bool = True,
+    structural_expansion: bool = True,
+    aligned_sibling_expansion: bool = True,
+) -> dict[str, Any]:
+    """在同一候选池上比较几组通用可回收的证据重排权重。
+
+    这是离线诊断，不读验证答案；只有某组权重在 held-out 上稳定超过默认方案，才考虑写入线上配置。
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type in _OPEN_TYPES:
+            grouped[question_type].append(row)
+    rng = random.Random(seed)
+    selected: list[dict[str, Any]] = []
+    for question_type in sorted(_OPEN_TYPES):
+        candidates = list(grouped.get(question_type, []))
+        rng.shuffle(candidates)
+        selected.extend(candidates[: max(1, int(max_per_type))])
+
+    values: dict[str, list[dict[str, float]]] = {
+        name: [] for name in _ANSWERABILITY_WEIGHT_GRID
+    }
+    baseline_values: list[dict[str, float]] = []
+    by_type: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: {name: [] for name in _ANSWERABILITY_WEIGHT_GRID}
+    )
+    for row in selected:
+        query = str(row[input_key])
+        expected = str(row[output_key])
+        question = _question_text(query)
+        baseline_hits = index.search(question, top_k=top_k)
+        queries = build_query_variants(question) if query_expansion else [question]
+        candidates = index.search_union(
+            queries,
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        if structural_expansion:
+            candidates = index.expand_structural_candidates(
+                question,
+                candidates,
+                include_aligned_siblings=aligned_sibling_expansion,
+            )
+        baseline_stats = _retrieval_stats(question, expected, baseline_hits)
+        baseline_values.append(baseline_stats)
+        question_type = _gold_items(expected)[0]
+        for name, weights in _ANSWERABILITY_WEIGHT_GRID.items():
+            selected_hits = rerank_answerable_hits(
+                question,
+                candidates,
+                top_k=top_k,
+                baseline_hits=baseline_hits[:1],
+                weights=weights,
+            )
+            stats = _retrieval_stats(question, expected, selected_hits)
+            values[name].append(stats)
+            by_type[question_type][name].append(stats["evidence_coverage"])
+
+    baseline_summary = _mean_stats(baseline_values)
+    grid_summary = {
+        name: {
+            **_mean_stats(stats),
+            "delta_vs_baseline": _mean_stats(stats)["evidence_coverage"]
+            - baseline_summary["evidence_coverage"],
+        }
+        for name, stats in values.items()
+    }
+    return {
+        "sample_count": len(selected),
+        "baseline": baseline_summary,
+        "grid": grid_summary,
+        "by_type": {
+            question_type: {
+                name: {
+                    "count": len(type_values[name]),
+                    "evidence_coverage": _mean(type_values[name]),
+                }
+                for name in _ANSWERABILITY_WEIGHT_GRID
+            }
+            for question_type, type_values in sorted(by_type.items())
+        },
+    }
+
+
 def _fit_linear_reranker(
     groups: list[dict[str, Any]],
     *,
