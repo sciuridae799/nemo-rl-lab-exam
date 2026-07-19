@@ -63,11 +63,12 @@ data:
   teacher_validation_diagnostic: false
   teacher_diagnostic_max_per_type: 4
   llm_reranker_model_path: /data/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
-  retrieval_diagnostic: false
+  retrieval_diagnostic: true
   retrieval_diagnostic_max_per_type: 32
   supervised_query_diagnostic: false
   weight_grid_diagnostic: false
   qa_memory_diagnostic: false
+  qa_memory_mapping_diagnostic: true
   retrieval_diagnostic_seed: 42
   open_loss_multiplier: 1.0
   train_question_types: []
@@ -103,7 +104,7 @@ env:
       max_result_chars: 1200
       evidence_reward_scale: 0.0
       # 仅用训练集中的相似题生成额外检索视角；不把训练答案直接放进上下文。
-      qa_memory_enabled: true
+      qa_memory_enabled: false
       qa_memory_path: /data/datasets/qa_rl/train.jsonl
       qa_memory_question_types: [single, multiple, bool, fill, short]
       qa_memory_top_k: 3

@@ -6,6 +6,7 @@ import hashlib
 import random
 import re
 from collections import defaultdict
+from difflib import SequenceMatcher
 from statistics import fmean
 from typing import Any
 
@@ -780,6 +781,183 @@ def evaluate_qa_memory_knn(
         "by_type": by_type,
         "confidence": confidence,
     }
+
+
+def _parse_closed_options(query: str) -> dict[str, str]:
+    """解析常见 A./B./C. 选项，不依赖具体题目内容。"""
+    match = re.search(r"选项[:：]\s*(.*)", str(query), flags=re.DOTALL)
+    if not match:
+        return {}
+    text = re.sub(r"\s+", " ", match.group(1)).strip()
+    pieces = re.split(r"\s+(?=[A-Z][.)、:：])", text)
+    options: dict[str, str] = {}
+    for piece in pieces:
+        item = re.match(r"\s*([A-Z])\s*[.)、:：]\s*(.*)", piece)
+        if item:
+            options[item.group(1)] = item.group(2).strip()
+    return options
+
+
+def _option_similarity(left: str, right: str) -> float:
+    left_text = compact_text(left)
+    right_text = compact_text(right)
+    if not left_text or not right_text:
+        return 0.0
+    if left_text == right_text:
+        return 1.0
+    left_bigrams = {left_text[i : i + 2] for i in range(max(0, len(left_text) - 1))}
+    right_bigrams = {right_text[i : i + 2] for i in range(max(0, len(right_text) - 1))}
+    jaccard = len(left_bigrams & right_bigrams) / max(1, len(left_bigrams | right_bigrams))
+    return max(jaccard, SequenceMatcher(None, left_text, right_text).ratio())
+
+
+def _closed_answer_letters(expected: str) -> set[str]:
+    match = _EXPECTED.match(str(expected))
+    payload = match.group(2) if match else str(expected)
+    return set(re.findall(r"[A-Z]", payload.upper()))
+
+
+def evaluate_qa_memory_option_mapping(
+    rows: list[dict[str, Any]],
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    neighbors: int = 5,
+    option_thresholds: tuple[float, ...] = (0.25, 0.40, 0.55),
+    vote_thresholds: tuple[float, ...] = (0.30, 0.50, 0.70),
+) -> dict[str, Any]:
+    """评估相似训练题答案经过选项语义映射后的 held-out 上限。
+
+    只在训练集内部按题干分组切分；验证答案不会进入拟合或候选生成。
+    """
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("QA memory mapping 需要 scikit-learn") from exc
+    from common.rewards.qa_reward import qa_rule_reward_fn
+
+    closed_types = {"single", "multiple", "bool"}
+    typed: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type in closed_types:
+            typed[question_type].append(row)
+
+    overall: dict[str, dict[str, list[float]]] = {
+        f"option_{option_threshold:.2f}_vote_{vote_threshold:.2f}": {
+            "raw": [],
+            "mapped": [],
+            "oracle": [],
+        }
+        for option_threshold in option_thresholds
+        for vote_threshold in vote_thresholds
+    }
+
+    for question_type, type_rows in sorted(typed.items()):
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in type_rows:
+            groups[compact_text(_question_text(str(row[input_key])))].append(row)
+        train_rows: list[dict[str, Any]] = []
+        holdout_rows: list[dict[str, Any]] = []
+        for group_rows in groups.values():
+            target = holdout_rows if _stable_holdout(str(group_rows[0][input_key])) else train_rows
+            target.extend(group_rows)
+        if not train_rows or not holdout_rows:
+            continue
+        vectorizer = TfidfVectorizer(
+            analyzer="char",
+            ngram_range=(2, 5),
+            min_df=1,
+            max_features=80_000,
+            sublinear_tf=True,
+        )
+        matrix = vectorizer.fit_transform(
+            [_question_text(str(row[input_key])) for row in train_rows]
+        )
+        for row in holdout_rows:
+            query = str(row[input_key])
+            expected = str(row[output_key])
+            current_options = _parse_closed_options(query)
+            similarities = (
+                matrix @ vectorizer.transform([_question_text(query)]).T
+            ).toarray().ravel()
+            positions = sorted(
+                range(len(similarities)),
+                key=lambda position: (float(similarities[position]), -position),
+                reverse=True,
+            )[: max(1, int(neighbors))]
+            raw_prediction = _boxed_from_expected(str(train_rows[positions[0]][output_key]))
+            raw_reward = float(qa_rule_reward_fn([query], [raw_prediction], [expected])[0])
+            for option_threshold in option_thresholds:
+                weighted: dict[str, float] = defaultdict(float)
+                oracle_candidates: list[str] = []
+                for position in positions:
+                    neighbor = train_rows[position]
+                    neighbor_options = _parse_closed_options(str(neighbor[input_key]))
+                    neighbor_letters = _closed_answer_letters(
+                        str(neighbor[output_key])
+                    )
+                    mapped_scores: list[tuple[str, float]] = []
+                    for letter in neighbor_letters:
+                        source = neighbor_options.get(letter)
+                        if not source or not current_options:
+                            continue
+                        target, score = max(
+                            (
+                                (target_letter, _option_similarity(source, target_text))
+                                for target_letter, target_text in current_options.items()
+                            ),
+                            key=lambda item: item[1],
+                            default=("", 0.0),
+                        )
+                        if score >= option_threshold:
+                            mapped_scores.append((target, score))
+                    prediction = {letter for letter, _ in mapped_scores}
+                    oracle_candidates.append(",".join(sorted(prediction)))
+                    for letter, score in mapped_scores:
+                        weighted[letter] += max(0.0, float(similarities[position])) * score
+                for vote_threshold in vote_thresholds:
+                    max_weight = max(weighted.values(), default=0.0)
+                    if question_type in {"single", "bool"} and weighted:
+                        prediction = {
+                            max(weighted, key=lambda letter: (weighted[letter], letter))
+                        }
+                    else:
+                        prediction = {
+                            letter
+                            for letter, weight in weighted.items()
+                            if max_weight > 0.0
+                            and weight >= max_weight * vote_threshold
+                        }
+                    mapped_text = "\\boxed{" + ",".join(sorted(prediction)) + "}"
+                    mapped_reward = float(
+                        qa_rule_reward_fn([query], [mapped_text], [expected])[0]
+                    )
+                    oracle_reward = max(
+                        float(
+                            qa_rule_reward_fn(
+                                [query], [f"\\boxed{{{candidate}}}"], [expected]
+                            )[0]
+                        )
+                        for candidate in oracle_candidates
+                    ) if oracle_candidates else 0.0
+                    key = f"option_{option_threshold:.2f}_vote_{vote_threshold:.2f}"
+                    overall[key]["raw"].append(raw_reward)
+                    overall[key]["mapped"].append(mapped_reward)
+                    overall[key]["oracle"].append(oracle_reward)
+
+    summary = {
+        key: {
+            "sample_count": len(values["mapped"]),
+            "raw_reward": _mean(values["raw"]),
+            "mapped_reward": _mean(values["mapped"]),
+            "oracle_reward": _mean(values["oracle"]),
+            "gain": _mean(values["mapped"]) - _mean(values["raw"]),
+        }
+        for key, values in sorted(overall.items())
+    }
+    best = max(summary.items(), key=lambda item: item[1]["mapped_reward"], default=("", {}))
+    return {"settings": summary, "best": {"name": best[0], **best[1]}}
 
 
 def evaluate_llm_candidate_reranker(

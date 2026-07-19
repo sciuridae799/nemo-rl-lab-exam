@@ -51,6 +51,7 @@ from common.environments.qa_retrieval_eval import (
     evaluate_llm_query_rewrite,
     evaluate_llm_teacher_agent,
     evaluate_qa_memory_knn,
+    evaluate_qa_memory_option_mapping,
     evaluate_retrieval_ab,
     evaluate_supervised_query_expansion,
 )
@@ -249,6 +250,15 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
     if not data_dir:
         raise SystemExit("缺少 QA_RL_DATA_DIR 或 data.data_dir")
 
+    train_rows = _read_jsonl(os.path.join(data_dir, "train.jsonl"))
+    if bool(data_cfg.get("qa_memory_mapping_diagnostic", False)):
+        report = evaluate_qa_memory_option_mapping(
+            train_rows,
+            input_key=str(data_cfg.get("input_key", "query")),
+            output_key=str(data_cfg.get("output_key", "expected_answer")),
+        )
+        print("QA记忆选项映射门控：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
     env_cfg = dict(config.env[TASK_NAME]["cfg"])
     index = LocalMarkdownIndex(
         env_cfg.get("docs_dir", "/data/docs"),
@@ -257,7 +267,6 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
         b=float(env_cfg.get("b", 0.75)),
         expand_ascii_tokens=bool(env_cfg.get("expand_ascii_tokens", False)),
     )
-    train_rows = _read_jsonl(os.path.join(data_dir, "train.jsonl"))
     if bool(data_cfg.get("teacher_validation_diagnostic", False)):
         model_path = str(data_cfg.get("llm_reranker_model_path") or "").strip()
         if not model_path:
