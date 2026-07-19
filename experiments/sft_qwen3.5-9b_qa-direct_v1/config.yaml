@@ -1,0 +1,105 @@
+# R9：用全训练集自然题型分布做最终答案直接 SFT。
+defaults:
+  - ../../configs/base/sft.yaml
+  - ../../configs/models/qwen3.5-9b.yaml
+  - ../../configs/base/grpo_megatron.yaml
+  - ../../configs/base/grpo_lora.yaml
+
+policy:
+  model_name: "Qwen/Qwen3.5-9B-Base"
+  tokenizer:
+    name: "Qwen/Qwen3.5-9B-Base"
+    # 轨迹首条消息已按线上模板渲染；后续动作/环境回灌必须原样拼接。
+    chat_template: null
+    chat_template_kwargs: null
+  # 集群版 PolicyConfig 即使在 SFT 中不启动生成后端，也要求完整 generation 结构。
+  generation:
+    backend: "vllm"
+    max_new_tokens: 4096
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    colocated:
+      # SFT 不启动生成 actor；该字段仅供 Megatron worker 初始化判断显存策略。
+      enabled: false
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+  max_total_sequence_length: 4096
+  train_global_batch_size: 64
+  train_micro_batch_size: 2
+  megatron_cfg:
+    activation_checkpointing: false
+    optimizer:
+      lr: 5.0e-7
+      min_lr: 5.0e-7
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+    scheduler:
+      lr_decay_style: "constant"
+      lr_warmup_iters: 1
+      lr_warmup_init: 5.0e-8
+      lr_decay_iters: 16
+
+sft:
+  # 每条样本只有最终 assistant 答案，不监督搜索轨迹。
+  only_unmask_final: true
+  max_num_epochs: 1
+  max_num_steps: 16
+  val_period: 4
+  val_batches: 4
+  val_global_batch_size: 64
+  val_micro_batch_size: 2
+  val_at_start: true
+  val_at_end: true
+  seed: 42
+
+checkpointing:
+  save_period: 4
+  save_optimizer: false
+  metric_name: "val:val_loss"
+  higher_is_better: false
+  keep_top_k: 3
+
+data:
+  add_bos: false
+  add_eos: true
+  add_generation_prompt: false
+  shuffle: true
+  num_workers: 1
+  max_input_seq_length: 4096
+  data_dir: /data/datasets/qa_rl
+  system_prompt: |-
+    你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
+    检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
+    作答时，以 <answer> 开始、以 </answer> 结束；先写一句依据，再用 LaTeX \boxed 命令包裹本题真实答案。
+    最多检索两次；收到“必须作答”后不得继续检索。检索结果由环境返回，不得编造。
+    花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
+  seed: 42
+  # SHA-1 稳定分组：约 5% 只用于监控 SFT loss，不是官方验证集。
+  validation_denominator: 20
+  resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400
+  resume_checkpoint_step: 30
+  # setup_data 前由 run.py 替换成去重、去冲突后的 JSONL。
+  train:
+    dataset_name: openai_format
+    data_path: /tmp/qa-direct-sft-train.jsonl
+    chat_key: messages
+    tool_key: null
+  validation:
+    dataset_name: openai_format
+    data_path: /tmp/qa-direct-sft-validation.jsonl
+    chat_key: messages
+    tool_key: null
+  default:
+    processor: sft_processor
+
+logger:
+  wandb_enabled: false
+  tensorboard_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
