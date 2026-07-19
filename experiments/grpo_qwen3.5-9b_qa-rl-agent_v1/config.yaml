@@ -60,10 +60,10 @@ data:
   llm_reranker_load_probe: false
   llm_reranker_diagnostic: false
   llm_query_rewrite_diagnostic: false
-  teacher_validation_diagnostic: true
+  teacher_validation_diagnostic: false
   teacher_diagnostic_max_per_type: 4
   llm_reranker_model_path: /data/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
-  retrieval_diagnostic: true
+  retrieval_diagnostic: false
   retrieval_diagnostic_max_per_type: 32
   supervised_query_diagnostic: false
   weight_grid_diagnostic: false
@@ -82,7 +82,8 @@ data:
     检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
     作答时，以 <answer> 开始、以 </answer> 结束；先写一句依据，再用 LaTeX \boxed 命令包裹本题真实答案。
     最多检索两次；收到“必须作答”后不得继续检索。检索结果由环境返回，不得编造。
-    回答单选、多选或判断题时，逐项核对选项与检索证据；检索结果未支持的选项不得仅凭常识补全。
+    检索结果可能包含相邻题目；作答前先定位与当前题干对应的完整条目，只使用该条目及其对应答案证据，不能把相邻题的选项或答案混入本题。
+    填空和简答优先逐字抽取证据中的答案短语；选择题先确认题干匹配，再逐项判断并按题目要求输出。
     花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
 
 env:
