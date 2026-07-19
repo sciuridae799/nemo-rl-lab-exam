@@ -813,6 +813,23 @@ def evaluate_llm_query_rewrite(
             baseline_hits=index.search(question, top_k=1),
         )
         shortlist = default_hits[: max(top_k, int(shortlist_size))]
+        snippet_pool = extract_answerable_snippets(
+            question,
+            expanded_candidates,
+            max_chars=140,
+        )
+        packed_top6 = rerank_answerable_hits(
+            question,
+            snippet_pool,
+            top_k=6,
+            baseline_hits=snippet_pool[:1],
+        )
+        packed_top8 = rerank_answerable_hits(
+            question,
+            snippet_pool,
+            top_k=8,
+            baseline_hits=snippet_pool[:1],
+        )
         prompt_candidates: list[tuple[str, str]] = []
         for hit in shortlist:
             snippets = extract_answerable_snippets(
@@ -846,6 +863,8 @@ def evaluate_llm_query_rewrite(
             "rewrite_pool": evidence_coverage(expected, rewritten_candidates),
             "expanded_pool": evidence_coverage(expected, expanded_candidates),
             "shortlist": evidence_coverage(expected, shortlist),
+            "packed_top6": evidence_coverage(expected, packed_top6),
+            "packed_top8": evidence_coverage(expected, packed_top8),
             "llm_top3": evidence_coverage(expected, chosen),
         }
         for name, coverage in coverages.items():
