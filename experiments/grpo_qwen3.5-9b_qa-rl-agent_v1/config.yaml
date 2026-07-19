@@ -59,6 +59,7 @@ data:
   runtime_capability_probe: false
   retrieval_diagnostic: false
   retrieval_diagnostic_max_per_type: 32
+  supervised_query_diagnostic: false
   retrieval_diagnostic_seed: 42
   open_loss_multiplier: 1.0
   train_question_types: []
