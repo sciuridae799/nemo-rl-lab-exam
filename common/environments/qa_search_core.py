@@ -152,6 +152,17 @@ def source_family_key(source: str) -> str:
     return f"{parent}/{stem}" if stem else ""
 
 
+def source_has_answer_role(source: str) -> bool:
+    """识别通用的答案/讲义文件角色，不依赖具体部门或设备词。"""
+    return bool(
+        re.search(
+            r"参考答案|标准答案|答案|讲义|教材|manual|solution|answer|training",
+            str(source),
+            re.IGNORECASE,
+        )
+    )
+
+
 def _informative_terms(text: str) -> set[str]:
     terms = set(_terms(text))
     return {term for term in terms if not (term.isascii() and term in _ENGLISH_STOPWORDS)}
@@ -177,22 +188,32 @@ def _cloze_bridge_signal(question: str, text: str) -> float:
         right_compact = compact_text(right)
         if not left_compact or not right_compact:
             continue
-        left_anchor = left_compact[-min(14, len(left_compact)) :]
-        right_anchor = right_compact[: min(14, len(right_compact))]
-        left_pos = compact_passage.find(left_anchor)
-        if left_pos < 0:
-            continue
-        gap_start = left_pos + len(left_anchor)
-        right_pos = compact_passage.find(right_anchor, gap_start)
-        if right_pos < 0:
-            continue
-        gap_length = right_pos - gap_start
-        if gap_length == 0:
-            signals.append(-1.0)
-        elif gap_length <= 48:
-            signals.append(1.0)
-        elif gap_length <= 120:
-            signals.append(0.25)
+        # OCR、换行和中英文混排会让固定长度锚点偶尔失配；从长到短
+        # 尝试多个锚点，并遍历少量左侧出现位置，避免被题面复刻遮蔽。
+        for anchor_length in (18, 14, 10, 7, 5):
+            left_anchor = left_compact[-min(anchor_length, len(left_compact)) :]
+            right_anchor = right_compact[: min(anchor_length, len(right_compact))]
+            search_from = 0
+            while True:
+                left_pos = compact_passage.find(left_anchor, search_from)
+                if left_pos < 0:
+                    break
+                gap_start = left_pos + len(left_anchor)
+                right_pos = compact_passage.find(right_anchor, gap_start)
+                if right_pos >= 0:
+                    gap_length = right_pos - gap_start
+                    if gap_length == 0:
+                        signals.append(-1.0)
+                    elif gap_length <= 48:
+                        signals.append(1.0)
+                    elif gap_length <= 120:
+                        signals.append(0.25)
+                search_from = left_pos + 1
+                # 同一锚点出现过多时不让一个长题面拖慢每轮检索。
+                if search_from > 4096:
+                    break
+            if any(signal > 0 for signal in signals):
+                break
 
     if any(signal > 0 for signal in signals):
         return max(signals)
@@ -716,11 +737,16 @@ class LocalMarkdownIndex:
         neighbor_window: int = 1,
         sibling_k: int = 4,
         max_seed_hits: int = 160,
+        include_aligned_siblings: bool = False,
     ) -> list[SearchHit]:
-        """补充同源相邻块和同文件族兄弟文档，不改变模型查询。"""
+        """补充同源相邻块和同文件族兄弟文档，不改变模型查询。
+
+        ``include_aligned_siblings`` 会将试卷片段的序号对齐到同族答案/讲义文档，
+        即使对齐片段本身没有题干词也保留为候选。默认关闭以保持旧行为。"""
         merged = {(hit.source, hit.text): hit for hit in hits}
         query_scores = self._score_query(query)
         sibling_sources: set[str] = set()
+        aligned_positions: dict[str, list[tuple[int, float]]] = defaultdict(list)
 
         for hit in hits[: max(1, int(max_seed_hits))]:
             doc_ids = self.chunk_doc_ids.get((hit.source, hit.text), [])
@@ -728,6 +754,9 @@ class LocalMarkdownIndex:
                 doc_id = doc_ids[0]
                 source_ids = self.source_doc_ids[hit.source]
                 position = self.doc_source_positions[doc_id]
+                family = source_family_key(hit.source)
+                if family:
+                    aligned_positions[family].append((position, hit.score))
                 for offset in range(-max(0, int(neighbor_window)), max(0, int(neighbor_window)) + 1):
                     neighbor_position = position + offset
                     if offset == 0 or not 0 <= neighbor_position < len(source_ids):
@@ -746,13 +775,54 @@ class LocalMarkdownIndex:
 
         sibling_sources.difference_update(hit.source for hit in hits)
         for source in sibling_sources:
-            ranked_ids = heapq.nlargest(
-                max(1, int(sibling_k)),
-                self.source_doc_ids[source],
-                key=lambda doc_id: (query_scores.get(doc_id, 0.0), -doc_id),
-            )
+            family = source_family_key(source)
+            aligned = aligned_positions.get(family, [])
+            aligned_candidates: list[tuple[float, int, int]] = []
+            if include_aligned_siblings and aligned:
+                source_ids = self.source_doc_ids[source]
+                for position, seed_score in aligned:
+                    for offset in range(
+                        -max(0, int(neighbor_window)),
+                        max(0, int(neighbor_window)) + 1,
+                    ):
+                        sibling_position = position + offset
+                        if not 0 <= sibling_position < len(source_ids):
+                            continue
+                        doc_id = source_ids[sibling_position]
+                        query_score = query_scores.get(doc_id, 0.0)
+                        aligned_score = max(query_score, seed_score * 0.72)
+                        aligned_candidates.append(
+                            (
+                                float(source_has_answer_role(source)),
+                                aligned_score,
+                                doc_id,
+                            )
+                        )
+            if aligned_candidates:
+                ranked_ids = [
+                    doc_id
+                    for _, _, doc_id in sorted(
+                        aligned_candidates,
+                        key=lambda item: (item[0], item[1], -item[2]),
+                        reverse=True,
+                    )[: max(1, int(sibling_k))]
+                ]
+            else:
+                ranked_ids = heapq.nlargest(
+                    max(1, int(sibling_k)),
+                    self.source_doc_ids[source],
+                    key=lambda doc_id: (query_scores.get(doc_id, 0.0), -doc_id),
+                )
             for doc_id in ranked_ids:
                 score = query_scores.get(doc_id, 0.0)
+                if include_aligned_siblings and aligned:
+                    seed_scores = [
+                        seed_score
+                        for position, seed_score in aligned
+                        if abs(self.doc_source_positions[doc_id] - position)
+                        <= max(0, int(neighbor_window))
+                    ]
+                    score = max(score, max(seed_scores, default=0.0) * 0.72)
                 if score <= 0.0:
                     continue
                 chunk = self.chunks[doc_id]
@@ -917,6 +987,7 @@ class QASearchRunner:
         answerability_rerank: bool = False,
         query_expansion: bool = False,
         structural_expansion: bool = False,
+        aligned_sibling_expansion: bool = False,
         max_searches: int = 2,
         max_result_chars: int = 1500,
         evidence_reward_scale: float = 0.0,
@@ -929,6 +1000,7 @@ class QASearchRunner:
         self.answerability_rerank = bool(answerability_rerank)
         self.query_expansion = bool(query_expansion)
         self.structural_expansion = bool(structural_expansion)
+        self.aligned_sibling_expansion = bool(aligned_sibling_expansion)
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
         self.evidence_reward_scale = max(0.0, float(evidence_reward_scale))
@@ -1073,6 +1145,7 @@ class QASearchRunner:
                     candidate_hits = self.index.expand_structural_candidates(
                         question,
                         candidate_hits,
+                        include_aligned_siblings=self.aligned_sibling_expansion,
                     )
                 hits = rerank_answerable_hits(
                     question,

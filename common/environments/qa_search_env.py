@@ -52,6 +52,7 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             answerability_rerank=bool(cfg.get("answerability_rerank", False)),
             query_expansion=bool(cfg.get("query_expansion", False)),
             structural_expansion=bool(cfg.get("structural_expansion", False)),
+            aligned_sibling_expansion=bool(cfg.get("aligned_sibling_expansion", False)),
             max_searches=int(cfg.get("max_searches", 2)),
             max_result_chars=int(cfg.get("max_result_chars", 1500)),
             evidence_reward_scale=float(cfg.get("evidence_reward_scale", 0.0)),

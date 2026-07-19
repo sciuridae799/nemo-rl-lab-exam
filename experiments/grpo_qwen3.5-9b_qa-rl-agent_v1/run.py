@@ -261,6 +261,7 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
         candidate_max_per_source=int(env_cfg.get("candidate_max_per_source", 4)),
         query_expansion=bool(env_cfg.get("query_expansion", False)),
         structural_expansion=bool(env_cfg.get("structural_expansion", False)),
+        aligned_sibling_expansion=bool(env_cfg.get("aligned_sibling_expansion", False)),
         packing_top_k=int(env_cfg.get("packing_top_k", 8)),
         packing_snippet_chars=int(env_cfg.get("packing_snippet_chars", 140)),
     )

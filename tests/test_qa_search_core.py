@@ -373,6 +373,40 @@ def test_structural_expansion_adds_adjacent_and_sibling_evidence(tmp_path):
     assert any(hit.source.endswith("答案.md") for hit in expanded)
 
 
+def test_aligned_sibling_keeps_answer_chunk_without_question_terms(tmp_path):
+    question = "设备通过【1】连接洁净室"
+    (tmp_path / "模块-试卷.md").write_text(
+        f"# 试卷\n\n填空题：{question}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "模块-答案.md").write_text(
+        "# 参考答案\n\n数据总线",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+    exam_chunk = next(chunk for chunk in index.chunks if chunk.source.endswith("试卷.md"))
+    baseline = index.expand_structural_candidates(
+        question,
+        [SearchHit(exam_chunk.source, exam_chunk.text, 10.0)],
+    )
+    aligned = index.expand_structural_candidates(
+        question,
+        [SearchHit(exam_chunk.source, exam_chunk.text, 10.0)],
+        include_aligned_siblings=True,
+    )
+
+    assert not any(hit.source.endswith("答案.md") and "数据总线" in hit.text for hit in baseline)
+    assert any(hit.source.endswith("答案.md") and "数据总线" in hit.text for hit in aligned)
+
+
+def test_cloze_bridge_tolerates_shorter_anchors():
+    question = "该设备在洁净室内通过长距离管路【1】连接到中央系统"
+    text = "该设备在洁净室内通过长距离管路数据总线连接到中央系统。"
+    from common.environments.qa_search_core import _cloze_bridge_signal
+
+    assert _cloze_bridge_signal(question, text) > 0.0
+
+
 def test_answerable_snippet_keeps_relevant_sentence_within_budget():
     question = "设备通过【1】连接洁净室"
     hit = SearchHit(

@@ -376,6 +376,7 @@ def evaluate_retrieval_ab(
     candidate_max_per_source: int = 4,
     query_expansion: bool = False,
     structural_expansion: bool = False,
+    aligned_sibling_expansion: bool = False,
     packing_top_k: int = 8,
     packing_snippet_chars: int = 140,
 ) -> dict[str, Any]:
@@ -436,6 +437,7 @@ def evaluate_retrieval_ab(
             candidate_hits = index.expand_structural_candidates(
                 question,
                 candidate_hits,
+                include_aligned_siblings=aligned_sibling_expansion,
             )
         reranked_hits = rerank_answerable_hits(
             question,
@@ -577,6 +579,7 @@ def evaluate_retrieval_ab(
         "candidate_max_per_source": int(candidate_max_per_source),
         "query_expansion": bool(query_expansion),
         "structural_expansion": bool(structural_expansion),
+        "aligned_sibling_expansion": bool(aligned_sibling_expansion),
         "packing_top_k": int(packing_top_k),
         "packing_snippet_chars": int(packing_snippet_chars),
         "linear_reranker_cv": linear_reranker_cv,
