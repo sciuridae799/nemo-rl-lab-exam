@@ -43,6 +43,21 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             reward_fn = qa_rule_reward_fn
             self._get_judge_stats = None
 
+        qa_memory = None
+        if bool(cfg.get("qa_memory_enabled", False)):
+            from common.environments.qa_memory import QAMemoryIndex
+
+            qa_memory = QAMemoryIndex(
+                cfg.get("qa_memory_path", "/data/datasets/qa_rl/train.jsonl"),
+                allowed_types=tuple(
+                    str(value)
+                    for value in cfg.get(
+                        "qa_memory_question_types",
+                        ("multiple", "bool"),
+                    )
+                ),
+            )
+
         self.runner = QASearchRunner(
             index,
             reward_fn,
@@ -56,12 +71,25 @@ class QASearchEnv(EnvironmentInterface[dict[str, Any]]):
             max_searches=int(cfg.get("max_searches", 2)),
             max_result_chars=int(cfg.get("max_result_chars", 1500)),
             evidence_reward_scale=float(cfg.get("evidence_reward_scale", 0.0)),
+            qa_memory=qa_memory,
+            qa_memory_top_k=int(cfg.get("qa_memory_top_k", 5)),
+            qa_memory_min_similarity=float(
+                cfg.get("qa_memory_min_similarity", 0.15)
+            ),
+            qa_memory_max_chars=int(cfg.get("qa_memory_max_chars", 900)),
         )
         print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")
         print(
             "训练专用证据进展奖励："
             f"scale={self.runner.evidence_reward_scale:.3f}；验证样本固定关闭"
         )
+        if qa_memory is not None:
+            print(
+                "训练题记忆 RAG：enabled；"
+                f"types={cfg.get('qa_memory_question_types', ['multiple', 'bool'])}；"
+                f"top_k={self.runner.qa_memory_top_k}；"
+                f"min_similarity={self.runner.qa_memory_min_similarity:.3f}"
+            )
 
     def step(
         self,

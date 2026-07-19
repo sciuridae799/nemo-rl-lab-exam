@@ -995,6 +995,10 @@ class QASearchRunner:
         max_searches: int = 2,
         max_result_chars: int = 1500,
         evidence_reward_scale: float = 0.0,
+        qa_memory: Any | None = None,
+        qa_memory_top_k: int = 5,
+        qa_memory_min_similarity: float = 0.15,
+        qa_memory_max_chars: int = 900,
     ):
         self.index = index
         self.reward_fn = reward_fn
@@ -1008,6 +1012,10 @@ class QASearchRunner:
         self.max_searches = max(1, int(max_searches))
         self.max_result_chars = max(200, int(max_result_chars))
         self.evidence_reward_scale = max(0.0, float(evidence_reward_scale))
+        self.qa_memory = qa_memory
+        self.qa_memory_top_k = max(1, int(qa_memory_top_k))
+        self.qa_memory_min_similarity = max(0.0, float(qa_memory_min_similarity))
+        self.qa_memory_max_chars = max(200, int(qa_memory_max_chars))
 
     def _next_action_hint(self, must_answer: bool) -> str:
         if must_answer:
@@ -1026,8 +1034,9 @@ class QASearchRunner:
         hits: list[SearchHit],
         *,
         must_answer: bool,
+        memory_hits: list[Any] | None = None,
     ) -> str:
-        if not hits:
+        if not hits and not memory_hits:
             return (
                 f"<search_results query=\"{_safe_label(search_query)}\">\n"
                 "未找到匹配内容。\n</search_results>\n"
@@ -1035,6 +1044,23 @@ class QASearchRunner:
             )
 
         parts = [f"<search_results query=\"{_safe_label(search_query)}\">"]
+        if memory_hits:
+            parts.append(
+                "\n<memory_examples>\n"
+                "以下仅为相似训练题参考；当前题选项可能不同，必须按当前题语义重新映射，不能机械复制字母。"
+            )
+            memory_used = 0
+            for rank, memory_hit in enumerate(memory_hits, start=1):
+                entry = (
+                    f"\n[相似题{rank} 相似度={float(memory_hit.similarity):.3f}]\n"
+                    f"题目：{memory_hit.question}\n训练集标准答案：{memory_hit.answer}\n"
+                )
+                remaining = self.qa_memory_max_chars - memory_used
+                if remaining <= 0:
+                    break
+                parts.append(entry[:remaining])
+                memory_used += min(len(entry), remaining)
+            parts.append("</memory_examples>")
         used = 0
         for rank, hit in enumerate(hits, start=1):
             prefix = f"\n[{rank}] 来源: {_safe_label(hit.source)}\n"
@@ -1159,6 +1185,15 @@ class QASearchRunner:
                 )
             else:
                 hits = baseline_hits
+            memory_hits = (
+                self.qa_memory.search(
+                    original_query,
+                    top_k=self.qa_memory_top_k,
+                    min_similarity=self.qa_memory_min_similarity,
+                )
+                if self.qa_memory is not None
+                else []
+            )
             next_metadata = dict(metadata)
             next_metadata["searches"] = searches + 1
             next_metadata["must_answer"] = searches + 1 >= self.max_searches
@@ -1183,6 +1218,7 @@ class QASearchRunner:
                         search_query,
                         hits,
                         must_answer=next_metadata["must_answer"],
+                        memory_hits=memory_hits,
                     ),
                 },
                 reward=0.0,

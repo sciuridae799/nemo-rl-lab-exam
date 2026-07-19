@@ -82,8 +82,6 @@ data:
     检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
     作答时，以 <answer> 开始、以 </answer> 结束；先写一句依据，再用 LaTeX \boxed 命令包裹本题真实答案。
     最多检索两次；收到“必须作答”后不得继续检索。检索结果由环境返回，不得编造。
-    检索结果可能包含相邻题目；作答前先定位与当前题干对应的完整条目，只使用该条目及其对应答案证据，不能把相邻题的选项或答案混入本题。
-    填空和简答优先逐字抽取证据中的答案短语；选择题先确认题干匹配，再逐项判断并按题目要求输出。
     花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
 
 env:
@@ -104,6 +102,13 @@ env:
       max_searches: 2
       max_result_chars: 1200
       evidence_reward_scale: 0.0
+      # 仅用训练集中的相似判断/多选题补充上下文；不读取验证答案。
+      qa_memory_enabled: true
+      qa_memory_path: /data/datasets/qa_rl/train.jsonl
+      qa_memory_question_types: [multiple, bool]
+      qa_memory_top_k: 5
+      qa_memory_min_similarity: 0.15
+      qa_memory_max_chars: 900
       k1: 1.5
       b: 0.75
       use_judge: true
