@@ -1,0 +1,128 @@
+# QA 多轮检索 Agent：只新增检索协议，复用现有 QA 数据和奖励。
+defaults:
+  - ../../configs/base/grpo_math_1B.yaml
+  - ../../configs/models/qwen3.5-9b.yaml
+  - ../../configs/base/grpo_megatron.yaml
+  - ../../configs/base/grpo_lora.yaml
+
+policy:
+  model_name: "Qwen/Qwen3.5-9B-Base"
+  tokenizer:
+    name: "Qwen/Qwen3.5-9B-Base"
+    # 工具标签必须出现在动作层，禁止在思考文本中提前触发停止串。
+    chat_template_kwargs:
+      enable_thinking: false
+  max_total_sequence_length: 4096
+  train_global_batch_size: 64
+  generation_batch_size: 16
+  generation:
+    max_new_tokens: 1280
+    # F4 训练使用已验证的 Qwen 非思考采样参数。
+    temperature: 0.7
+    top_p: 0.8
+    top_k: 20
+  # 短任务使用独立学习率日程，避免全程停留在 50-step 预热阶段。
+  megatron_cfg:
+    optimizer:
+      # 检索策略发生变化时只做保守的 warm-start 更新，保护 F4 的封闭题能力。
+      lr: 2.0e-6
+      min_lr: 5.0e-7
+    scheduler:
+      lr_decay_style: "constant"
+      lr_warmup_iters: 1
+      # 正式短跑固定六步，结束后根据 validation 曲线决定是否保留。
+      lr_decay_iters: 6
+
+grpo:
+  # F4 的 4×8 组内方差较大；本轮保持 8×8，只改变隐藏答案锚点检索。
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8
+  max_rollout_turns: 4
+  max_num_steps: 6
+  val_period: 2
+  val_at_start: true
+  val_at_end: true
+  max_val_samples: 128
+  val_batch_size: 32
+  # Colocated vLLM 连续补采样会在反复唤醒时累积显存，单卡关闭。
+  use_dynamic_sampling: false
+
+loss_fn:
+  reference_policy_kl_penalty: 0.03
+  # DAPO Clip-Higher：给低概率探索动作更大的上升空间。
+  ratio_clip_max: 0.28
+
+data:
+  shuffle: true
+  input_key: query
+  output_key: expected_answer
+  data_dir: /data/datasets/qa_rl
+  runtime_capability_probe: false
+  llm_reranker_load_probe: false
+  llm_reranker_diagnostic: false
+  llm_binary_reranker_diagnostic: false
+  llm_query_rewrite_diagnostic: false
+  teacher_validation_diagnostic: false
+  teacher_diagnostic_max_per_type: 4
+  llm_reranker_model_path: /data/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  retrieval_diagnostic: false
+  retrieval_diagnostic_max_per_type: 32
+  supervised_query_diagnostic: false
+  weight_grid_diagnostic: false
+  qa_memory_diagnostic: false
+  qa_memory_mapping_diagnostic: false
+  retrieval_diagnostic_seed: 42
+  open_loss_multiplier: 1.0
+  train_question_types: []
+  resume_checkpoint_dir: /shared/outputs/pengyuyang/grpo_qwen3.5-9b_qa-rl-agent_v1/grpo_qwen3.5-9b_qa-rl-agent_v1-pengyuyang-20260718-131400
+  resume_checkpoint_step: 30
+  resume_validation_only: false
+  resume_weights_only: true
+  # 正式训练：只从 F4 权重初始化，GRPO 状态/optimizer/scheduler 全部新建。
+  weights_only_validation_only: false
+  system_prompt: |-
+    你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
+    检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。
+    作答时，以 <answer> 开始、以 </answer> 结束；先写一句依据，再用 LaTeX \boxed 命令包裹本题真实答案。
+    最多检索两次；收到“必须作答”后不得继续检索。检索结果由环境返回，不得编造。
+    花括号内必须严格遵守题目要求的字母、逗号或分号格式，禁止填写“答案”“最终答案”等占位词。
+
+env:
+  _override_: true
+  qa_search:
+    cfg:
+      docs_dir: /data/docs
+      chunk_chars: 480
+      top_k: 3
+      # 仅对填空/简答从更多 BM25 候选中重排，最终回灌条数不变。
+      candidate_k: 120
+      candidate_max_per_source: 4
+      answerability_rerank: true
+      query_expansion: true
+      structural_expansion: false
+      aligned_sibling_expansion: false
+      expand_ascii_tokens: false
+      max_searches: 2
+      max_result_chars: 1200
+      evidence_reward_scale: 0.0
+      # 只用训练集相似开放题的答案词串生成隐藏检索查询；答案不进入 observation。
+      qa_memory_enabled: true
+      qa_memory_path: /data/datasets/qa_rl/train.jsonl
+      qa_memory_question_types: [fill, short]
+      qa_memory_top_k: 1
+      qa_memory_min_similarity: 0.30
+      qa_memory_max_chars: 900
+      qa_memory_query_expansion: true
+      qa_memory_context: false
+      qa_memory_answer_query: true
+      qa_memory_answer_min_similarity: 0.30
+      k1: 1.5
+      b: 0.75
+      use_judge: true
+
+logger:
+  wandb_enabled: false
+  tensorboard_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  num_val_samples_to_print: 5

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from common.environments.qa_memory import QAMemoryHit
 from common.environments.qa_search_core import (
     ANSWERABILITY_FEATURE_NAMES,
     LocalMarkdownIndex,
@@ -93,6 +94,43 @@ def test_search_then_final_answer(runner):
     assert final_result.reward == pytest.approx(1.0)
     assert final_result.terminated
     assert final_result.metadata is None
+
+
+def test_training_answer_anchor_is_hidden_but_expands_retrieval(tmp_path):
+    (tmp_path / "manual.md").write_text(
+        "# 手册\n\n设备通过数据总线连接洁净室。",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+
+    class Memory:
+        def search(self, query, *, top_k, min_similarity):
+            return [QAMemoryHit("设备如何连接洁净室", "数据总线", 0.8)]
+
+    hidden = QASearchRunner(
+        index,
+        qa_rule_reward_fn,
+        top_k=1,
+        candidate_k=4,
+        answerability_rerank=True,
+        query_expansion=True,
+        qa_memory=Memory(),
+        qa_memory_query_expansion=True,
+        qa_memory_context=False,
+        qa_memory_answer_query=True,
+        qa_memory_answer_min_similarity=0.3,
+    )
+    result = hidden.process_turn(
+        [{"role": "assistant", "content": "<search>连接洁净室</search>"}],
+        {
+            "query": "下面是一道填空题。\n题目：设备通过【1】连接洁净室",
+            "expected_answer": "[fill] 数据总线",
+            "is_training": False,
+        },
+    )
+
+    assert "数据总线" in result.observation["content"]
+    assert "训练集标准答案" not in result.observation["content"]
 
 
 def test_train_only_evidence_progress_reward_does_not_change_observation(runner):

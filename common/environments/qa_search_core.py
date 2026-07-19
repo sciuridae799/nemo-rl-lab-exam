@@ -1001,6 +1001,8 @@ class QASearchRunner:
         qa_memory_max_chars: int = 900,
         qa_memory_query_expansion: bool = False,
         qa_memory_context: bool = True,
+        qa_memory_answer_query: bool = False,
+        qa_memory_answer_min_similarity: float = 0.30,
     ):
         self.index = index
         self.reward_fn = reward_fn
@@ -1020,6 +1022,12 @@ class QASearchRunner:
         self.qa_memory_max_chars = max(200, int(qa_memory_max_chars))
         self.qa_memory_query_expansion = bool(qa_memory_query_expansion)
         self.qa_memory_context = bool(qa_memory_context)
+        # 训练集相似题的答案只作为隐藏检索查询，不进入模型 observation。
+        # 默认关闭，保持历史实验的行为完全不变。
+        self.qa_memory_answer_query = bool(qa_memory_answer_query)
+        self.qa_memory_answer_min_similarity = max(
+            0.0, float(qa_memory_answer_min_similarity)
+        )
 
     def _next_action_hint(self, must_answer: bool) -> str:
         if must_answer:
@@ -1178,6 +1186,17 @@ class QASearchRunner:
                 if self.qa_memory_query_expansion
                 else []
             )
+            memory_answer_queries = (
+                [
+                    hit.answer
+                    for hit in memory_hits
+                    if self.qa_memory_answer_query
+                    and float(hit.similarity) >= self.qa_memory_answer_min_similarity
+                    and str(hit.answer).strip()
+                ]
+                if self.qa_memory_answer_query
+                else []
+            )
             if rerank_question:
                 queries = (
                     build_query_variants(question, search_query)
@@ -1185,6 +1204,7 @@ class QASearchRunner:
                     else [retrieval_query]
                 )
                 queries.extend(memory_queries)
+                queries.extend(memory_answer_queries)
                 queries = list(dict.fromkeys(query for query in queries if query.strip()))
                 candidate_hits = self.index.search_union(
                     queries,
