@@ -13,7 +13,7 @@ policy:
     chat_template_kwargs:
       enable_thinking: false
   max_total_sequence_length: 4096
-  train_global_batch_size: 32
+  train_global_batch_size: 64
   generation_batch_size: 16
   generation:
     max_new_tokens: 1280
@@ -24,21 +24,22 @@ policy:
   # 短任务使用独立学习率日程，避免全程停留在 50-step 预热阶段。
   megatron_cfg:
     optimizer:
-      lr: 1.0e-5
+      # 从 F4 权重继续训练时降低单步扰动，避免小批量更新破坏已学会的格式/封闭题能力。
+      lr: 5.0e-6
       min_lr: 1.0e-6
     scheduler:
       lr_decay_style: "constant"
-      lr_warmup_iters: 2
-      # 行为门通过后使用全新的三步调度器。
-      lr_decay_iters: 3
+      lr_warmup_iters: 1
+      # 正式短跑固定四步，结束后根据 validation 曲线决定是否保留。
+      lr_decay_iters: 4
 
 grpo:
-  num_prompts_per_step: 4
+  # F4 的 4×8 组内方差较大；正式短跑扩大为 8×8，但不增加 rollout 轮数。
+  num_prompts_per_step: 8
   num_generations_per_prompt: 8
   max_rollout_turns: 4
-  # F4 通用证据核对提示 validation-only；训练预算仍限制为三步。
-  max_num_steps: 3
-  val_period: 3
+  max_num_steps: 4
+  val_period: 2
   val_at_start: true
   val_at_end: true
   max_val_samples: 128
@@ -47,7 +48,7 @@ grpo:
   use_dynamic_sampling: false
 
 loss_fn:
-  reference_policy_kl_penalty: 0.01
+  reference_policy_kl_penalty: 0.02
   # DAPO Clip-Higher：给低概率探索动作更大的上升空间。
   ratio_clip_max: 0.28
 
@@ -59,6 +60,7 @@ data:
   runtime_capability_probe: false
   llm_reranker_load_probe: false
   llm_reranker_diagnostic: false
+  llm_binary_reranker_diagnostic: false
   llm_query_rewrite_diagnostic: false
   teacher_validation_diagnostic: false
   teacher_diagnostic_max_per_type: 4
@@ -76,8 +78,8 @@ data:
   resume_checkpoint_step: 30
   resume_validation_only: false
   resume_weights_only: true
-  # 只验证通用证据核对提示，不执行 optimizer step。
-  weights_only_validation_only: true
+  # 正式训练：只从 F4 权重初始化，GRPO 状态/optimizer/scheduler 全部新建。
+  weights_only_validation_only: false
   system_prompt: |-
     你是技术培训考试检索 Agent。禁止输出思考过程或复述规则，每轮只能完整执行一个动作。
     检索时，以 <search> 开始、以 </search> 结束，标签内只写从当前题干提取的具体关键词。

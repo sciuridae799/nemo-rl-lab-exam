@@ -156,3 +156,27 @@ class QwenCandidateReranker:
         )
         decoded = self._generate(prompt, max_new_tokens=96)
         return parse_query_list(decoded, limit=limit), decoded
+
+    def judge_candidate(
+        self,
+        question: str,
+        source: str,
+        text: str,
+    ) -> tuple[float, str]:
+        """逐候选判断可回答性，返回 0/1 分数和原始短输出。"""
+        prompt = (
+            "你是严格的检索证据判别器。判断候选资料是否直接包含回答问题所需的事实。\n"
+            "只输出一个数字：1 表示候选包含可用于回答问题的事实，0 表示不包含；"
+            "不要回答问题，不要解释，不要凭常识补全。\n"
+            f"问题：{question}\n来源：{source}\n候选资料：{text}\n"
+            "判定："
+        )
+        decoded = self._generate(prompt, max_new_tokens=8)
+        lines = [line.strip() for line in decoded.splitlines() if line.strip()]
+        for line in reversed(lines):
+            match = re.fullmatch(r"[`\[({]*(0|1)[`\]})。.!！]*", line)
+            if match:
+                return float(match.group(1)), decoded
+        # 只接受独立的 0/1，避免把题干数字误当判定。
+        matches = re.findall(r"(?<!\d)([01])(?!\d)", decoded)
+        return (float(matches[-1]) if matches else 0.0), decoded

@@ -975,15 +975,24 @@ def evaluate_llm_candidate_reranker(
     shortlist_size: int = 18,
 ) -> dict[str, Any]:
     """让指令模型只看问题和候选，评估语义 Top-3 重排的训练集门控。"""
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for row in rows:
         question_type, _ = _gold_items(str(row.get(output_key, "")))
         if question_type in _OPEN_TYPES:
-            grouped[question_type].append(row)
+            question = _question_text(str(row.get(input_key, "")))
+            grouped[question_type][compact_text(question)].append(row)
     rng = random.Random(seed)
     selected_rows: list[dict[str, Any]] = []
     for question_type in sorted(_OPEN_TYPES):
-        candidates = list(grouped.get(question_type, []))
+        # 只从规范化题干的稳定 held-out 折抽样，避免同题重复行泄漏到门控结果。
+        candidates = [
+            row
+            for question, group_rows in grouped.get(question_type, {}).items()
+            if _stable_holdout(question)
+            for row in group_rows
+        ]
         rng.shuffle(candidates)
         selected_rows.extend(candidates[: max(1, int(max_per_type))])
 
@@ -1284,6 +1293,137 @@ def evaluate_llm_query_rewrite(
         "by_type": {
             question_type: {
                 "count": len(type_values.get("baseline_top3", [])),
+                **{
+                    f"{name}_evidence_coverage": _mean(stage)
+                    for name, stage in sorted(type_values.items())
+                },
+            }
+            for question_type, type_values in sorted(by_type.items())
+        },
+        "raw_examples": raw_examples,
+    }
+
+
+def evaluate_llm_binary_reranker(
+    rows: list[dict[str, Any]],
+    index: LocalMarkdownIndex,
+    reranker: Any,
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    max_per_type: int = 4,
+    seed: int = 42,
+    top_k: int = 3,
+    candidate_k: int = 80,
+    candidate_max_per_source: int = 4,
+    shortlist_size: int = 10,
+) -> dict[str, Any]:
+    """用逐候选二分类 cross-encoder 做训练集 held-out 检索门控。"""
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type in _OPEN_TYPES:
+            question = _question_text(str(row.get(input_key, "")))
+            grouped[question_type][compact_text(question)].append(row)
+    rng = random.Random(seed)
+    selected_rows: list[dict[str, Any]] = []
+    for question_type in sorted(_OPEN_TYPES):
+        # 按规范化题干固定 held-out 折，避免同题重复行泄漏到门控结果。
+        candidates = [
+            row
+            for question, group_rows in grouped.get(question_type, {}).items()
+            if _stable_holdout(question)
+            for row in group_rows
+        ]
+        rng.shuffle(candidates)
+        selected_rows.extend(candidates[: max(1, int(max_per_type))])
+
+    values: dict[str, list[float]] = defaultdict(list)
+    by_type: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    positive_predictions = 0
+    score_count = 0
+    raw_examples: list[dict[str, Any]] = []
+
+    for row in selected_rows:
+        question = _question_text(str(row[input_key]))
+        expected = str(row[output_key])
+        baseline_hits = index.search(question, top_k=top_k)
+        candidates = index.search_union(
+            build_query_variants(question),
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        candidates = index.expand_structural_candidates(
+            question,
+            candidates,
+            include_aligned_siblings=True,
+        )
+        deterministic = rerank_answerable_hits(
+            question,
+            candidates,
+            top_k=max(top_k, int(shortlist_size)),
+            baseline_hits=baseline_hits[:1],
+        )[: max(top_k, int(shortlist_size))]
+        scored: list[tuple[float, int, SearchHit, str]] = []
+        for position, hit in enumerate(deterministic):
+            score, raw = reranker.judge_candidate(question, hit.source, hit.text[:260])
+            score_count += 1
+            positive_predictions += int(score > 0.5)
+            scored.append((score, position, hit, raw))
+        ordered = sorted(
+            scored,
+            key=lambda item: (item[0], item[2].score, -item[1]),
+            reverse=True,
+        )
+        chosen: list[SearchHit] = []
+        source_counts: dict[str, int] = defaultdict(int)
+        for _score, _, hit, _ in ordered:
+            if source_counts[hit.source] >= 2:
+                continue
+            chosen.append(hit)
+            source_counts[hit.source] += 1
+            if len(chosen) >= top_k:
+                break
+        if len(chosen) < top_k:
+            chosen.extend(hit for _, _, hit, _ in ordered if hit not in chosen)
+            chosen = chosen[:top_k]
+        coverages = {
+            "baseline_top3": evidence_coverage(expected, baseline_hits),
+            "candidate_pool": evidence_coverage(expected, candidates),
+            "binary_top3": evidence_coverage(expected, chosen),
+        }
+        for name, coverage in coverages.items():
+            values[name].append(coverage)
+            question_type = _gold_items(expected)[0]
+            by_type[question_type][name].append(coverage)
+        if len(raw_examples) < 6:
+            raw_examples.append(
+                {
+                    "type": _gold_items(expected)[0],
+                    "baseline_top3": coverages["baseline_top3"],
+                    "candidate_pool": coverages["candidate_pool"],
+                    "binary_top3": coverages["binary_top3"],
+                    "positive_count": sum(score > 0.5 for score, *_ in scored),
+                }
+            )
+
+    summary = {f"{name}_evidence_coverage": _mean(stage) for name, stage in values.items()}
+    return {
+        "sample_count": len(selected_rows),
+        "max_per_type": int(max_per_type),
+        "shortlist_size": int(shortlist_size),
+        **summary,
+        "gain_vs_baseline": summary.get("binary_top3_evidence_coverage", 0.0)
+        - summary.get("baseline_top3_evidence_coverage", 0.0),
+        "positive_prediction_rate": positive_predictions / score_count if score_count else 0.0,
+        "score_count": score_count,
+        "by_type": {
+            question_type: {
+                "count": len(type_values.get("binary_top3", [])),
                 **{
                     f"{name}_evidence_coverage": _mean(stage)
                     for name, stage in sorted(type_values.items())
