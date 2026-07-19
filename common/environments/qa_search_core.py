@@ -825,6 +825,29 @@ def qa_type_from_text(text: str) -> str:
     return "unknown"
 
 
+def filter_qa_rows_by_type(
+    rows: Iterable[dict[str, Any]],
+    allowed_question_types: Iterable[str] | None,
+    *,
+    input_key: str = "query",
+) -> list[dict[str, Any]]:
+    """按显式题型白名单筛选训练行；空白名单保持原顺序和内容。"""
+    requested = {str(name).strip() for name in (allowed_question_types or ()) if str(name).strip()}
+    if not requested:
+        return list(rows)
+    invalid = requested - set(_QA_TYPE_MARKERS)
+    if invalid:
+        raise ValueError(f"未知 QA 题型：{sorted(invalid)}")
+    filtered = [
+        row
+        for row in rows
+        if qa_type_from_text(str(row.get(input_key, ""))) in requested
+    ]
+    if not filtered:
+        raise ValueError(f"题型过滤后训练集为空：允许 {sorted(requested)}")
+    return filtered
+
+
 def qa_loss_multiplier(
     question: str,
     *,

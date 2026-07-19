@@ -46,6 +46,7 @@ from common.environments.qa_retrieval_eval import evaluate_retrieval_ab
 from common.environments.qa_search_core import (
     STOP_STRINGS,
     LocalMarkdownIndex,
+    filter_qa_rows_by_type,
     qa_loss_multiplier,
     qa_type_from_text,
 )
@@ -83,14 +84,26 @@ class QAAgentDataset(Dataset):
         open_loss_multiplier: float = 1.0,
         *,
         is_training: bool,
+        allowed_question_types: tuple[str, ...] | None = None,
     ):
+        self.is_training = bool(is_training)
         self.rows = _read_jsonl(path)
+        if self.is_training and allowed_question_types:
+            original_count = len(self.rows)
+            self.rows = filter_qa_rows_by_type(
+                self.rows,
+                allowed_question_types,
+                input_key=input_key,
+            )
+            print(
+                f"训练集题型过滤：{original_count} -> {len(self.rows)} 条；"
+                f"允许 {sorted(set(allowed_question_types))}"
+            )
         self.tokenizer = tokenizer
         self.input_key = input_key
         self.output_key = output_key
         self.system_prompt = system_prompt
         self.chat_template_kwargs = dict(chat_template_kwargs or {})
-        self.is_training = bool(is_training)
         self.open_loss_multiplier = float(open_loss_multiplier)
         type_counts = Counter(
             qa_type_from_text(str(row[self.input_key])) for row in self.rows
@@ -308,10 +321,14 @@ def main():
         dict(config.policy["tokenizer"].get("chat_template_kwargs") or {}),
         float(data_cfg.get("open_loss_multiplier", 1.0)),
     )
+    train_question_types = tuple(
+        str(value) for value in (data_cfg.get("train_question_types") or [])
+    )
     train_dataset = QAAgentDataset(
         os.path.join(data_dir, "train.jsonl"),
         *dataset_args,
         is_training=True,
+        allowed_question_types=train_question_types,
     )
     val_dataset = QAAgentDataset(
         os.path.join(data_dir, "val.jsonl"),

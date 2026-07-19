@@ -13,6 +13,7 @@ from common.environments.qa_search_core import (
     build_query_variants,
     evidence_progress_coverage,
     extract_answerable_snippets,
+    filter_qa_rows_by_type,
     qa_loss_multiplier,
     qa_reward_diagnostics,
     qa_type_from_text,
@@ -48,6 +49,19 @@ def test_chinese_retrieval_returns_relevant_source(runner):
     assert hits
     assert hits[0].source == "process.md"
     assert "离子源" in hits[0].text
+
+
+def test_filter_qa_rows_by_type_is_explicit_and_preserves_order():
+    rows = [
+        {"query": "下面是一道单选题。A", "id": 1},
+        {"query": "下面是一道简答题。B", "id": 2},
+        {"query": "下面是一道判断题。C", "id": 3},
+    ]
+    filtered = filter_qa_rows_by_type(rows, ("single", "bool"))
+    assert [row["id"] for row in filtered] == [1, 3]
+    assert filter_qa_rows_by_type(rows, None) == rows
+    with pytest.raises(ValueError, match="未知 QA 题型"):
+        filter_qa_rows_by_type(rows, ("essay",))
 
 
 def test_search_then_final_answer(runner):
