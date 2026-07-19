@@ -10,6 +10,7 @@ from common.environments.qa_retrieval_eval import (
     _fit_linear_reranker,
     _linear_reranker_cross_validation,
     _predict_linear_reranker,
+    evaluate_llm_candidate_reranker,
     evaluate_retrieval_ab,
     evaluate_supervised_query_expansion,
     evidence_coverage,
@@ -31,6 +32,41 @@ def test_evidence_coverage_accepts_gold_alternatives():
 
 def test_boxed_from_expected_formats_short_answer_items():
     assert _boxed_from_expected("[short] 要点一 ||| 要点二") == "\\boxed{要点一 ; 要点二}"
+
+
+def test_llm_candidate_reranker_report_uses_selected_ids(tmp_path):
+    (tmp_path / "模块-试卷.md").write_text(
+        "# 试卷\n\n设备通过【1】连接系统。",
+        encoding="utf-8",
+    )
+    (tmp_path / "模块-答案.md").write_text(
+        "# 参考答案\n\n设备通过数据总线连接系统。",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+
+    class FirstCandidateReranker:
+        def select(self, question, candidates, *, limit=3):
+            assert question and candidates and limit == 3
+            return [0], "[1]"
+
+    report = evaluate_llm_candidate_reranker(
+        [
+            {
+                "query": "下面是一道填空题。\n\n题目：设备通过【1】连接系统",
+                "expected_answer": "[fill] 数据总线",
+            }
+        ],
+        index,
+        FirstCandidateReranker(),
+        max_per_type=1,
+        candidate_k=4,
+        candidate_max_per_source=2,
+        shortlist_size=4,
+    )
+
+    assert report["sample_count"] == 1
+    assert report["mean_selected_count"] == 1.0
 
 
 def test_retrieval_ab_reports_answer_evidence_gain(tmp_path):

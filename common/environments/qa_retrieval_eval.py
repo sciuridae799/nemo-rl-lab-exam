@@ -577,6 +577,155 @@ def evaluate_qa_memory_knn(
     }
 
 
+def evaluate_llm_candidate_reranker(
+    rows: list[dict[str, Any]],
+    index: LocalMarkdownIndex,
+    reranker: Any,
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    max_per_type: int = 16,
+    seed: int = 42,
+    top_k: int = 3,
+    candidate_k: int = 80,
+    candidate_max_per_source: int = 4,
+    shortlist_size: int = 18,
+) -> dict[str, Any]:
+    """让指令模型只看问题和候选，评估语义 Top-3 重排的训练集门控。"""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type in _OPEN_TYPES:
+            grouped[question_type].append(row)
+    rng = random.Random(seed)
+    selected_rows: list[dict[str, Any]] = []
+    for question_type in sorted(_OPEN_TYPES):
+        candidates = list(grouped.get(question_type, []))
+        rng.shuffle(candidates)
+        selected_rows.extend(candidates[: max(1, int(max_per_type))])
+
+    default_values: list[float] = []
+    candidate_values: list[float] = []
+    llm_values: list[float] = []
+    by_type: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: {"default": [], "candidate": [], "llm": []}
+    )
+    empty_selections = 0
+    mean_selected: list[float] = []
+    raw_examples: list[dict[str, Any]] = []
+
+    for row in selected_rows:
+        question = _question_text(str(row[input_key]))
+        expected = str(row[output_key])
+        question_type = _gold_items(expected)[0]
+        baseline_hits = index.search(question, top_k=top_k)
+        candidates = index.search_union(
+            build_query_variants(question),
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        candidates = index.expand_structural_candidates(
+            question,
+            candidates,
+            include_aligned_siblings=True,
+        )
+        default_hits = rerank_answerable_hits(
+            question,
+            candidates,
+            top_k=max(8, top_k),
+            baseline_hits=baseline_hits[:1],
+            weights=_ANSWERABILITY_WEIGHT_GRID["default"],
+        )
+        role_hits = rerank_answerable_hits(
+            question,
+            candidates,
+            top_k=max(8, top_k),
+            baseline_hits=baseline_hits[:1],
+            weights=_ANSWERABILITY_WEIGHT_GRID["answer_role_strict"],
+        )
+        shortlist: list[SearchHit] = []
+        seen: set[tuple[str, str]] = set()
+        for hit in [*default_hits, *candidates[:8], *role_hits]:
+            key = (hit.source, hit.text)
+            if key in seen:
+                continue
+            seen.add(key)
+            shortlist.append(hit)
+            if len(shortlist) >= max(top_k, int(shortlist_size)):
+                break
+
+        prompt_candidates: list[tuple[str, str]] = []
+        for hit in shortlist:
+            snippets = extract_answerable_snippets(
+                question,
+                [hit],
+                max_chars=220,
+            )
+            prompt_candidates.append(
+                (hit.source, snippets[0].text if snippets else hit.text[:220])
+            )
+        selected_positions, raw = reranker.select(
+            question,
+            prompt_candidates,
+            limit=top_k,
+        )
+        empty_selections += int(not selected_positions)
+        chosen = [shortlist[position] for position in selected_positions]
+        chosen_keys = {(hit.source, hit.text) for hit in chosen}
+        for hit in default_hits:
+            key = (hit.source, hit.text)
+            if key not in chosen_keys:
+                chosen.append(hit)
+                chosen_keys.add(key)
+            if len(chosen) >= top_k:
+                break
+        chosen = chosen[:top_k]
+
+        default_coverage = evidence_coverage(expected, default_hits[:top_k])
+        candidate_coverage = evidence_coverage(expected, shortlist)
+        llm_coverage = evidence_coverage(expected, chosen)
+        default_values.append(default_coverage)
+        candidate_values.append(candidate_coverage)
+        llm_values.append(llm_coverage)
+        mean_selected.append(float(len(selected_positions)))
+        by_type[question_type]["default"].append(default_coverage)
+        by_type[question_type]["candidate"].append(candidate_coverage)
+        by_type[question_type]["llm"].append(llm_coverage)
+        if len(raw_examples) < 8:
+            raw_examples.append(
+                {
+                    "type": question_type,
+                    "raw": raw[:120],
+                    "selected": selected_positions,
+                    "default_coverage": default_coverage,
+                    "candidate_coverage": candidate_coverage,
+                    "llm_coverage": llm_coverage,
+                }
+            )
+
+    return {
+        "sample_count": len(selected_rows),
+        "shortlist_size": int(shortlist_size),
+        "default_top3_evidence_coverage": _mean(default_values),
+        "shortlist_evidence_coverage": _mean(candidate_values),
+        "llm_top3_evidence_coverage": _mean(llm_values),
+        "llm_gain_vs_default": _mean(llm_values) - _mean(default_values),
+        "selection_gap": _mean(candidate_values) - _mean(llm_values),
+        "empty_selection_count": empty_selections,
+        "mean_selected_count": _mean(mean_selected),
+        "by_type": {
+            question_type: {
+                "count": len(values["default"]),
+                "default_top3_evidence_coverage": _mean(values["default"]),
+                "shortlist_evidence_coverage": _mean(values["candidate"]),
+                "llm_top3_evidence_coverage": _mean(values["llm"]),
+            }
+            for question_type, values in sorted(by_type.items())
+        },
+        "raw_examples": raw_examples,
+    }
+
+
 def _fit_linear_reranker(
     groups: list[dict[str, Any]],
     *,

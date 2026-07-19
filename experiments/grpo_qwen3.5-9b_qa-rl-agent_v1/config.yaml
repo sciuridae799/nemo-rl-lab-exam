@@ -58,6 +58,7 @@ data:
   data_dir: /data/datasets/qa_rl
   runtime_capability_probe: false
   llm_reranker_load_probe: false
+  llm_reranker_diagnostic: false
   llm_reranker_model_path: /data/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a
   retrieval_diagnostic: false
   retrieval_diagnostic_max_per_type: 32
