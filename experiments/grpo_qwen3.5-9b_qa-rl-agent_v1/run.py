@@ -44,6 +44,7 @@ from nemo_rl.utils.config import (
 )
 from nemo_rl.utils.logger import get_next_experiment_dir
 
+from common.environments.qa_llm_reranker import QwenCandidateReranker
 from common.environments.qa_retrieval_eval import (
     evaluate_answerability_weight_grid,
     evaluate_qa_memory_knn,
@@ -323,6 +324,29 @@ def _run_qa_memory_diagnostic(config: MasterConfig) -> None:
     print("QA训练记忆门控：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
+def _run_llm_reranker_load_probe(config: MasterConfig) -> None:
+    """加载平台已有指令模型并完成一个不含真实题目的重排冒烟。"""
+    model_path = str(config.data.get("llm_reranker_model_path") or "").strip()
+    if not model_path:
+        raise SystemExit("缺少 data.llm_reranker_model_path")
+    reranker = QwenCandidateReranker(model_path)
+    selected, raw = reranker.select(
+        "设备通过什么方式连接系统？",
+        [
+            ("示例手册", "设备通过数据总线连接系统。"),
+            ("无关资料", "本页介绍人员培训安排。"),
+        ],
+    )
+    print(
+        "LLM重排加载探针："
+        + json.dumps(
+            {"selected": selected, "raw": raw, "model_path": model_path},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
 def _seed_grpo_weights_only(
     config: MasterConfig,
     train_dataset: QAAgentDataset,
@@ -421,6 +445,10 @@ def main():
 
     if bool(config.data.get("runtime_capability_probe", False)):
         _runtime_capability_probe()
+        return
+
+    if bool(config.data.get("llm_reranker_load_probe", False)):
+        _run_llm_reranker_load_probe(config)
         return
 
     if bool(config.data.get("qa_memory_diagnostic", False)):
