@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from common.environments.qa_retrieval_eval import (
+    _boxed_from_expected,
     _fit_linear_reranker,
     _linear_reranker_cross_validation,
     _predict_linear_reranker,
@@ -26,6 +27,10 @@ def test_evidence_coverage_accepts_gold_alternatives():
     ]
     assert evidence_coverage("[fill] SQL server/SQL服务器", hits) == 1.0
     assert evidence_coverage("[fill] Air shower", hits) == 0.0
+
+
+def test_boxed_from_expected_formats_short_answer_items():
+    assert _boxed_from_expected("[short] 要点一 ||| 要点二") == "\\boxed{要点一 ; 要点二}"
 
 
 def test_retrieval_ab_reports_answer_evidence_gain(tmp_path):

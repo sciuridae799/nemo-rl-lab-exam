@@ -430,6 +430,153 @@ def evaluate_answerability_weight_grid(
     }
 
 
+def _boxed_from_expected(expected: str) -> str:
+    match = _EXPECTED.match(str(expected))
+    payload = match.group(2).strip() if match else str(expected).strip()
+    # 官方规则对简答要点使用 ||| 分隔，模型答案使用分号。
+    return "\\boxed{" + payload.replace("|||", ";") + "}"
+
+
+def evaluate_qa_memory_knn(
+    rows: list[dict[str, Any]],
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    neighbors: int = 5,
+) -> dict[str, Any]:
+    """评估训练集内非参数问题记忆的 held-out 上限。
+
+    按规范化题干分组后做稳定 80/20 切分，确保同题重复行不跨折。该诊断只使用
+    训练数据，用来判断“相似训练题提示”是否值得进入无训练 A/B。
+    """
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+    except ImportError as exc:  # pragma: no cover - 远端能力依赖
+        raise RuntimeError("QA memory diagnostic 需要 scikit-learn") from exc
+    from common.rewards.qa_reward import qa_rule_reward_fn
+
+    typed: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type in {"single", "multiple", "bool", "fill", "short"}:
+            typed[question_type].append(row)
+
+    by_type: dict[str, Any] = {}
+    all_top1: list[float] = []
+    all_vote: list[float] = []
+    all_oracle: list[float] = []
+    confidence_rows: list[tuple[float, float]] = []
+    for question_type, type_rows in sorted(typed.items()):
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in type_rows:
+            question = _question_text(str(row[input_key]))
+            grouped[compact_text(question)].append(row)
+        train_rows: list[dict[str, Any]] = []
+        holdout_rows: list[dict[str, Any]] = []
+        for group_rows in grouped.values():
+            if _stable_holdout(str(group_rows[0][input_key])):
+                holdout_rows.extend(group_rows)
+            else:
+                train_rows.extend(group_rows)
+        if not train_rows or not holdout_rows:
+            continue
+
+        train_questions = [_question_text(str(row[input_key])) for row in train_rows]
+        holdout_questions = [_question_text(str(row[input_key])) for row in holdout_rows]
+        vectorizer = TfidfVectorizer(
+            analyzer="char",
+            ngram_range=(2, 5),
+            min_df=1,
+            max_features=80_000,
+            sublinear_tf=True,
+        )
+        train_matrix = vectorizer.fit_transform(train_questions)
+        holdout_matrix = vectorizer.transform(holdout_questions)
+        similarity_matrix = (holdout_matrix @ train_matrix.T).toarray()
+
+        top1_values: list[float] = []
+        vote_values: list[float] = []
+        oracle_values: list[float] = []
+        similarities: list[float] = []
+        for row_index, row in enumerate(holdout_rows):
+            similarities_row = similarity_matrix[row_index]
+            top_positions = sorted(
+                range(len(similarities_row)),
+                key=lambda position: (float(similarities_row[position]), -position),
+                reverse=True,
+            )[: max(1, int(neighbors))]
+            predicted_rows = [train_rows[position] for position in top_positions]
+            query = str(row[input_key])
+            expected = str(row[output_key])
+            candidate_rewards = [
+                float(
+                    qa_rule_reward_fn(
+                        [query],
+                        [_boxed_from_expected(str(candidate[output_key]))],
+                        [expected],
+                    )[0]
+                )
+                for candidate in predicted_rows
+            ]
+            top1 = candidate_rewards[0]
+            oracle = max(candidate_rewards)
+
+            vote_scores: dict[str, float] = defaultdict(float)
+            vote_expected: dict[str, str] = {}
+            for position in top_positions:
+                candidate_expected = str(train_rows[position][output_key])
+                answer_key = compact_text(candidate_expected)
+                vote_scores[answer_key] += max(0.0, float(similarities_row[position]))
+                vote_expected[answer_key] = candidate_expected
+            best_vote_key = max(
+                vote_scores,
+                key=lambda key: (vote_scores[key], key),
+            )
+            vote = float(
+                qa_rule_reward_fn(
+                    [query],
+                    [_boxed_from_expected(vote_expected[best_vote_key])],
+                    [expected],
+                )[0]
+            )
+            similarity = float(similarities_row[top_positions[0]])
+            top1_values.append(top1)
+            vote_values.append(vote)
+            oracle_values.append(oracle)
+            similarities.append(similarity)
+            confidence_rows.append((similarity, top1))
+
+        by_type[question_type] = {
+            "train_count": len(train_rows),
+            "holdout_count": len(holdout_rows),
+            "unique_question_count": len(grouped),
+            "top1_reward": _mean(top1_values),
+            "vote_reward": _mean(vote_values),
+            "top5_oracle_reward": _mean(oracle_values),
+            "mean_top1_similarity": _mean(similarities),
+        }
+        all_top1.extend(top1_values)
+        all_vote.extend(vote_values)
+        all_oracle.extend(oracle_values)
+
+    confidence = {}
+    for threshold in (0.50, 0.60, 0.70, 0.80, 0.90):
+        selected = [reward for similarity, reward in confidence_rows if similarity >= threshold]
+        confidence[f"at_{threshold:.2f}"] = {
+            "count": len(selected),
+            "coverage": len(selected) / len(confidence_rows) if confidence_rows else 0.0,
+            "top1_reward": _mean(selected),
+        }
+    return {
+        "sample_count": len(confidence_rows),
+        "top1_reward": _mean(all_top1),
+        "vote_reward": _mean(all_vote),
+        "top5_oracle_reward": _mean(all_oracle),
+        "by_type": by_type,
+        "confidence": confidence,
+    }
+
+
 def _fit_linear_reranker(
     groups: list[dict[str, Any]],
     *,

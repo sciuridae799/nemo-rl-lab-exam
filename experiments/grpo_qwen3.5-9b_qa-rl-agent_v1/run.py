@@ -46,6 +46,7 @@ from nemo_rl.utils.logger import get_next_experiment_dir
 
 from common.environments.qa_retrieval_eval import (
     evaluate_answerability_weight_grid,
+    evaluate_qa_memory_knn,
     evaluate_retrieval_ab,
     evaluate_supervised_query_expansion,
 )
@@ -307,6 +308,21 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
     print("QA检索A/B：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
+def _run_qa_memory_diagnostic(config: MasterConfig) -> None:
+    """不构建文档索引，只评估训练集问题记忆的分组 held-out 上限。"""
+    data_cfg: dict[str, Any] = config.data
+    data_dir = os.environ.get("QA_RL_DATA_DIR") or data_cfg.get("data_dir")
+    if not data_dir:
+        raise SystemExit("缺少 QA_RL_DATA_DIR 或 data.data_dir")
+    train_rows = _read_jsonl(os.path.join(data_dir, "train.jsonl"))
+    report = evaluate_qa_memory_knn(
+        train_rows,
+        input_key=str(data_cfg.get("input_key", "query")),
+        output_key=str(data_cfg.get("output_key", "expected_answer")),
+    )
+    print("QA训练记忆门控：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
 def _seed_grpo_weights_only(
     config: MasterConfig,
     train_dataset: QAAgentDataset,
@@ -405,6 +421,10 @@ def main():
 
     if bool(config.data.get("runtime_capability_probe", False)):
         _runtime_capability_probe()
+        return
+
+    if bool(config.data.get("qa_memory_diagnostic", False)):
+        _run_qa_memory_diagnostic(config)
         return
 
     if bool(config.data.get("retrieval_diagnostic", False)):
