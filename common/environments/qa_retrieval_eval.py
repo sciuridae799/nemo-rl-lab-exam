@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from collections import defaultdict
@@ -128,6 +129,191 @@ def _presence_coverage(expected: str, present: set[str]) -> float:
 
 def _mean(values: list[float]) -> float:
     return fmean(values) if values else 0.0
+
+
+def _supervised_answer_text(expected: str, *, max_chars: int = 180) -> str:
+    """仅用于训练集检索扩展的答案词串，不向模型暴露 gold。
+
+    只保留填空/简答的核心字段，限长并去掉题型标记，以免将整段标准答案作为查询。
+    """
+    question_type, items = _gold_items(expected)
+    if question_type not in _OPEN_TYPES:
+        return ""
+    values: list[str] = []
+    for alternatives in items:
+        if alternatives:
+            values.append(alternatives[0][:48])
+    return " ".join(values)[: max(24, int(max_chars))]
+
+
+def _stable_holdout(question: str, *, denominator: int = 5) -> bool:
+    digest = hashlib.sha1(compact_text(question).encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % max(2, int(denominator)) == 0
+
+
+def evaluate_supervised_query_expansion(
+    rows: list[dict[str, Any]],
+    index: LocalMarkdownIndex,
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    top_k: int = 3,
+    candidate_k: int = 80,
+    candidate_max_per_source: int = 4,
+    query_expansion: bool = True,
+    structural_expansion: bool = True,
+    aligned_sibling_expansion: bool = True,
+    max_neighbors: int = 3,
+    min_similarity: float = 0.25,
+) -> dict[str, Any]:
+    """用训练题目的重新编码进行查询扩展，按规范化题干做 held-out 门控。
+
+    训练折只用训练题的文本和期望答案拟合 TF-IDF 近邻；测试折的期望答案仅用于离线评估。
+    这个函数不读验证集，可在正式环境中将拟合器只用训练数据构建。
+    """
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+    except ImportError as exc:  # pragma: no cover - 远端能力依赖
+        raise RuntimeError("supervised query expansion 需要 scikit-learn") from exc
+
+    open_rows = [
+        row
+        for row in rows
+        if _gold_items(str(row.get(output_key, "")))[0] in _OPEN_TYPES
+    ]
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in open_rows:
+        groups[compact_text(_question_text(str(row.get(input_key, ""))))].append(row)
+
+    train_rows: list[dict[str, Any]] = []
+    holdout_rows: list[dict[str, Any]] = []
+    for group_rows in groups.values():
+        if _stable_holdout(str(group_rows[0].get(input_key, ""))):
+            holdout_rows.extend(group_rows)
+        else:
+            train_rows.extend(group_rows)
+    if not holdout_rows or not train_rows:
+        raise ValueError("监督查询扩展分折后 train/holdout 为空")
+
+    train_questions = [
+        _question_text(str(row[input_key])) for row in train_rows
+    ]
+    vectorizer = TfidfVectorizer(
+        analyzer="char",
+        ngram_range=(2, 5),
+        min_df=1,
+        max_features=60_000,
+        sublinear_tf=True,
+    )
+    train_matrix = vectorizer.fit_transform(train_questions)
+    train_answers = [
+        _supervised_answer_text(str(row[output_key])) for row in train_rows
+    ]
+
+    baseline_values: list[dict[str, float]] = []
+    supervised_values: list[dict[str, float]] = []
+    by_type: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: {"baseline": [], "supervised": []}
+    )
+    neighbor_similarities: list[float] = []
+    neighbor_counts: list[float] = []
+    changed = 0
+
+    for row in holdout_rows:
+        question = _question_text(str(row[input_key]))
+        expected = str(row[output_key])
+        base_queries = build_query_variants(question) if query_expansion else [question]
+        base_candidates = index.search_union(
+            base_queries,
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        if structural_expansion:
+            base_candidates = index.expand_structural_candidates(
+                question,
+                base_candidates,
+                include_aligned_siblings=aligned_sibling_expansion,
+            )
+        base_hits = rerank_answerable_hits(
+            question,
+            base_candidates,
+            top_k=top_k,
+            baseline_hits=index.search(question, top_k=top_k)[:1],
+        )
+
+        query_vector = vectorizer.transform([question])
+        similarities = (train_matrix @ query_vector.T).toarray().ravel()
+        neighbor_positions = sorted(
+            range(len(similarities)),
+            key=lambda position: (float(similarities[position]), -position),
+            reverse=True,
+        )
+        neighbor_positions = [
+            position
+            for position in neighbor_positions[: max(1, int(max_neighbors))]
+            if float(similarities[position]) >= float(min_similarity)
+            and train_answers[position]
+        ]
+        neighbor_similarities.extend(float(similarities[position]) for position in neighbor_positions)
+        neighbor_counts.append(float(len(neighbor_positions)))
+        supervised_queries = list(base_queries)
+        for position in neighbor_positions:
+            answer = train_answers[position]
+            supervised_queries.extend((answer, question + "\n" + answer))
+        supervised_candidates = index.search_union(
+            supervised_queries,
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        if structural_expansion:
+            supervised_candidates = index.expand_structural_candidates(
+                question,
+                supervised_candidates,
+                include_aligned_siblings=aligned_sibling_expansion,
+            )
+        supervised_hits = rerank_answerable_hits(
+            question,
+            supervised_candidates,
+            top_k=top_k,
+            baseline_hits=index.search(question, top_k=top_k)[:1],
+        )
+
+        baseline_stats = _retrieval_stats(question, expected, base_hits)
+        supervised_stats = _retrieval_stats(question, expected, supervised_hits)
+        baseline_values.append(baseline_stats)
+        supervised_values.append(supervised_stats)
+        question_type = _gold_items(expected)[0]
+        by_type[question_type]["baseline"].append(baseline_stats["evidence_coverage"])
+        by_type[question_type]["supervised"].append(supervised_stats["evidence_coverage"])
+        changed += int(
+            [(hit.source, hit.text) for hit in base_hits]
+            != [(hit.source, hit.text) for hit in supervised_hits]
+        )
+
+    baseline_summary = _mean_stats(baseline_values)
+    supervised_summary = _mean_stats(supervised_values)
+    return {
+        "sample_count": len(holdout_rows),
+        "train_count": len(train_rows),
+        "unique_question_count": len(groups),
+        "baseline": baseline_summary,
+        "supervised": supervised_summary,
+        "delta": {
+            key: supervised_summary[key] - baseline_summary[key]
+            for key in baseline_summary
+        },
+        "changed_samples": changed,
+        "mean_neighbor_similarity": _mean(neighbor_similarities),
+        "mean_neighbor_count": _mean(neighbor_counts),
+        "by_type": {
+            question_type: {
+                "count": len(values["baseline"]),
+                "baseline_evidence_coverage": _mean(values["baseline"]),
+                "supervised_evidence_coverage": _mean(values["supervised"]),
+            }
+            for question_type, values in sorted(by_type.items())
+        },
+    }
 
 
 def _fit_linear_reranker(

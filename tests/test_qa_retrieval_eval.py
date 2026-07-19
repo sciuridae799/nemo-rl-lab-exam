@@ -10,6 +10,7 @@ from common.environments.qa_retrieval_eval import (
     _linear_reranker_cross_validation,
     _predict_linear_reranker,
     evaluate_retrieval_ab,
+    evaluate_supervised_query_expansion,
     evidence_coverage,
 )
 from common.environments.qa_search_core import LocalMarkdownIndex, SearchHit
@@ -98,6 +99,47 @@ def test_retrieval_ab_can_expand_sibling_answer_document(tmp_path):
     assert report["funnel"]["candidate_pool_evidence_coverage"] == 0.0
     assert report["funnel"]["expanded_pool_evidence_coverage"] == 1.0
     assert report["funnel"]["structural_coverage_improved_samples"] == 1
+
+
+def test_supervised_query_expansion_uses_train_only_neighbors(tmp_path):
+    pytest.importorskip("sklearn")
+    (tmp_path / "manual.md").write_text(
+        "# Manual\n\n"
+        "设备甲通过数据总线连接洁净室。\n"
+        "设备乙通过光纤连接洁净室。\n"
+        "设备丙通过控制线连接洁净室。\n",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=200)
+    rows = [
+        {
+            "query": f"下面是一道填空题。\n\n题目：设备{label}通过【1】连接洁净室",
+            "expected_answer": f"[fill] {answer}",
+        }
+        for label, answer in (
+            ("甲", "数据总线"),
+            ("乙", "光纤"),
+            ("丙", "控制线"),
+            ("丁", "数据总线"),
+            ("戊", "光纤"),
+            ("己", "控制线"),
+            ("庚", "数据总线"),
+            ("辛", "光纤"),
+        )
+    ]
+    report = evaluate_supervised_query_expansion(
+        rows,
+        index,
+        candidate_k=6,
+        candidate_max_per_source=3,
+        structural_expansion=False,
+        aligned_sibling_expansion=False,
+        min_similarity=0.0,
+    )
+
+    assert report["sample_count"] > 0
+    assert report["train_count"] > 0
+    assert "delta" in report
 
 
 def test_retrieval_funnel_separates_corpus_presence_from_query_recall(tmp_path):
