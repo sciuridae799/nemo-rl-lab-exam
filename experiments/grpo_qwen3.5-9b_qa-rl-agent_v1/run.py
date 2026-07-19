@@ -49,6 +49,7 @@ from common.environments.qa_retrieval_eval import (
     evaluate_answerability_weight_grid,
     evaluate_llm_candidate_reranker,
     evaluate_llm_query_rewrite,
+    evaluate_llm_teacher_agent,
     evaluate_qa_memory_knn,
     evaluate_retrieval_ab,
     evaluate_supervised_query_expansion,
@@ -257,6 +258,32 @@ def _run_retrieval_diagnostic(config: MasterConfig) -> None:
         expand_ascii_tokens=bool(env_cfg.get("expand_ascii_tokens", False)),
     )
     train_rows = _read_jsonl(os.path.join(data_dir, "train.jsonl"))
+    if bool(data_cfg.get("teacher_validation_diagnostic", False)):
+        model_path = str(data_cfg.get("llm_reranker_model_path") or "").strip()
+        if not model_path:
+            raise SystemExit("缺少 data.llm_reranker_model_path")
+        val_rows = _read_jsonl(os.path.join(data_dir, "val.jsonl"))
+        teacher = QwenCandidateReranker(model_path)
+        report = evaluate_llm_teacher_agent(
+            val_rows,
+            index,
+            teacher,
+            input_key=str(data_cfg.get("input_key", "query")),
+            output_key=str(data_cfg.get("output_key", "expected_answer")),
+            max_per_type=int(data_cfg.get("teacher_diagnostic_max_per_type", 4)),
+            seed=int(data_cfg.get("retrieval_diagnostic_seed", config.grpo["seed"])),
+            top_k=int(env_cfg.get("top_k", 3)),
+            candidate_k=int(env_cfg.get("candidate_k", 80)),
+            candidate_max_per_source=int(env_cfg.get("candidate_max_per_source", 4)),
+            query_expansion=bool(env_cfg.get("query_expansion", True)),
+            structural_expansion=bool(env_cfg.get("structural_expansion", False)),
+            aligned_sibling_expansion=bool(env_cfg.get("aligned_sibling_expansion", False)),
+            max_searches=int(env_cfg.get("max_searches", 2)),
+            max_result_chars=int(env_cfg.get("max_result_chars", 1200)),
+        )
+        print(f"文档索引完成：{len(index.chunks)} 个片段，目录 {index.docs_dir}")
+        print("LLM教师端到端门控：" + json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
     if bool(data_cfg.get("llm_query_rewrite_diagnostic", False)):
         model_path = str(data_cfg.get("llm_reranker_model_path") or "").strip()
         if not model_path:

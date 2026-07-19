@@ -26,6 +26,8 @@ from common.environments.qa_search_core import (
 
 _EXPECTED = re.compile(r"\s*\[(\w+)]\s*(.*)", re.DOTALL)
 _OPEN_TYPES = {"fill", "short"}
+_TEACHER_SEARCH = re.compile(r"<search>\s*(.*?)\s*</search>", re.IGNORECASE | re.DOTALL)
+_TEACHER_ANSWER = re.compile(r"<answer>[\s\S]*?</answer>", re.IGNORECASE)
 
 
 def _gold_items(expected: str) -> tuple[str, list[list[str]]]:
@@ -129,6 +131,196 @@ def _presence_coverage(expected: str, present: set[str]) -> float:
 
 def _mean(values: list[float]) -> float:
     return fmean(values) if values else 0.0
+
+
+def _teacher_observation(
+    question: str,
+    search_query: str,
+    hits: list[SearchHit],
+    *,
+    max_chars: int = 1200,
+    must_answer: bool,
+) -> str:
+    """将检索结果格式化为教师模型可读、但不含 gold 的观测。"""
+    safe_query = str(search_query).replace("<", "＜").replace(">", "＞")
+    parts = [f'<search_results query="{safe_query}">']
+    used = 0
+    for rank, hit in enumerate(hits, start=1):
+        remaining = int(max_chars) - used
+        if remaining <= 0:
+            break
+        body = hit.text[:remaining]
+        parts.append(f"\n[{rank}] 来源: {hit.source}\n{body}")
+        used += len(body)
+    parts.append("\n</search_results>")
+    if must_answer:
+        parts.append("\n现在必须直接作答，只输出 answer XML 和 \\boxed{}，不得再次检索。")
+    else:
+        parts.append("\n如证据不足可再检索一次，否则直接作答。")
+    return "".join(parts)
+
+
+def evaluate_llm_teacher_agent(
+    rows: list[dict[str, Any]],
+    index: LocalMarkdownIndex,
+    teacher: Any,
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    max_per_type: int = 4,
+    seed: int = 42,
+    top_k: int = 3,
+    candidate_k: int = 80,
+    candidate_max_per_source: int = 4,
+    query_expansion: bool = True,
+    structural_expansion: bool = False,
+    aligned_sibling_expansion: bool = False,
+    max_searches: int = 2,
+    max_result_chars: int = 1200,
+) -> dict[str, Any]:
+    """用已有指令模型做小规模端到端教师门控。
+
+    教师只看到题干和 BM25 检索观测；期望答案仅在生成完成后交给官方奖励函数
+    计算指标，不参与查询、提示或候选选择。该函数不更新权重。
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type != "unknown":
+            grouped[question_type].append(row)
+    rng = random.Random(seed)
+    selected_rows: list[dict[str, Any]] = []
+    for question_type in ("single", "multiple", "bool", "fill", "short"):
+        candidates = list(grouped.get(question_type, []))
+        rng.shuffle(candidates)
+        selected_rows.extend(candidates[: max(1, int(max_per_type))])
+
+    system_prompt = (
+        "你是技术培训考试问答 Agent。只能依据题干和检索资料作答，不要编造或凭常识补全。"
+        "需要资料时只输出一个 <search>关键词</search> 动作；拿到资料后，最终只输出"
+        "<answer>简短依据；\\boxed{答案}</answer>。严格按题目要求填写字母、逗号或分号。"
+    )
+    completions: list[str] = []
+    questions: list[str] = []
+    expected_answers: list[str] = []
+    search_counts: list[float] = []
+    errors = 0
+
+    for row in selected_rows:
+        query = str(row[input_key])
+        question = _question_text(query)
+        expected = str(row[output_key])
+        history: list[str] = [f"系统：{system_prompt}", f"题目：{question}"]
+        final_text = ""
+        searches = 0
+        try:
+            while searches <= max(0, int(max_searches)):
+                force_answer = searches >= max(0, int(max_searches))
+                if force_answer:
+                    history.append(
+                        "现在只输出最终 <answer>，必须包含 \\boxed{}，不要输出 <search>。"
+                    )
+                prompt = "\n\n".join(history)
+                generated = str(
+                    teacher._generate(prompt, max_new_tokens=192 if force_answer else 64)
+                ).strip()
+                final_match = _TEACHER_ANSWER.search(generated)
+                search_match = _TEACHER_SEARCH.search(generated)
+                if final_match or ("\\boxed" in generated and not search_match):
+                    final_text = generated
+                    break
+                if not search_match or force_answer:
+                    history.append("助手：" + generated)
+                    history.append(
+                        "格式不完整。现在只输出最终 <answer>，必须包含 \\boxed{}，不要解释。"
+                    )
+                    generated = str(teacher._generate("\n\n".join(history), max_new_tokens=192)).strip()
+                    final_text = generated
+                    break
+
+                search_query = search_match.group(1).strip() or question
+                retrieval_query = search_query + "\n" + question
+                baseline_hits = index.search(retrieval_query, top_k=top_k)
+                if query_expansion:
+                    queries = build_query_variants(question, search_query)
+                else:
+                    queries = [retrieval_query]
+                candidate_hits = index.search_union(
+                    queries,
+                    candidate_k=candidate_k,
+                    max_per_source=candidate_max_per_source,
+                )
+                if structural_expansion:
+                    candidate_hits = index.expand_structural_candidates(
+                        question,
+                        candidate_hits,
+                        include_aligned_siblings=aligned_sibling_expansion,
+                    )
+                hits = rerank_answerable_hits(
+                    question,
+                    candidate_hits,
+                    top_k=top_k,
+                    baseline_hits=baseline_hits,
+                )
+                searches += 1
+                history.extend(
+                    [
+                        "助手：<search>" + search_query + "</search>",
+                        "环境：" + _teacher_observation(
+                            question,
+                            search_query,
+                            hits,
+                            max_chars=max_result_chars,
+                            must_answer=searches >= max(0, int(max_searches)),
+                        ),
+                    ]
+                )
+        except Exception:
+            errors += 1
+            final_text = ""
+        completions.append(final_text)
+        questions.append(query)
+        expected_answers.append(expected)
+        search_counts.append(float(searches))
+
+    try:
+        from common.rewards.qa_judge_reward import qa_judge_reward_fn
+
+        rewards = qa_judge_reward_fn(questions, completions, expected_answers)
+    except Exception:
+        from common.rewards.qa_reward import qa_rule_reward_fn
+
+        rewards = qa_rule_reward_fn(questions, completions, expected_answers)
+
+    by_type: dict[str, list[float]] = defaultdict(list)
+    for row, reward in zip(selected_rows, rewards, strict=False):
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        by_type[question_type].append(float(reward))
+    open_rewards = [
+        float(reward)
+        for row, reward in zip(selected_rows, rewards, strict=False)
+        if _gold_items(str(row.get(output_key, "")))[0] in _OPEN_TYPES
+    ]
+    return {
+        "sample_count": len(selected_rows),
+        "max_per_type": int(max_per_type),
+        "seed": int(seed),
+        "mean_reward": _mean([float(value) for value in rewards]),
+        "perfect_rate": _mean([float(float(value) >= 1.0) for value in rewards]),
+        "format_penalty_count": sum(float(value) < 0.0 for value in rewards),
+        "open_positive_count": sum(value > 0.0 for value in open_rewards),
+        "open_count": len(open_rewards),
+        "mean_searches": _mean(search_counts),
+        "errors": errors,
+        "by_type": {
+            question_type: {
+                "count": len(values),
+                "mean_reward": _mean(values),
+                "perfect_count": sum(value >= 1.0 for value in values),
+            }
+            for question_type, values in sorted(by_type.items())
+        },
+    }
 
 
 def _supervised_answer_text(expected: str, *, max_chars: int = 180) -> str:
