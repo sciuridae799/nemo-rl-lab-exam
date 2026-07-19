@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -16,6 +17,38 @@ def parse_rank_ids(text: str, *, candidate_count: int, limit: int = 3) -> list[i
         if len(selected) >= max(1, int(limit)):
             break
     return selected
+
+
+def parse_query_list(text: str, *, limit: int = 3) -> list[str]:
+    """解析 JSON 数组或逐行检索式，去标签、去重并限长。"""
+    raw_text = str(text).strip()
+    values: list[str] = []
+    array_match = re.search(r"\[[\s\S]*?]", raw_text)
+    if array_match:
+        try:
+            parsed = json.loads(array_match.group(0))
+            if isinstance(parsed, list):
+                values.extend(str(value) for value in parsed)
+        except json.JSONDecodeError:
+            pass
+    if not values:
+        values.extend(
+            re.sub(r"^\s*(?:[-*]|\d+[.、)])\s*", "", line)
+            for line in raw_text.splitlines()
+            if line.strip()
+        )
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = re.sub(r"</?search>", "", value, flags=re.IGNORECASE).strip()
+        cleaned = cleaned.strip("`\"'[] ")[:160]
+        key = re.sub(r"\s+", "", cleaned).lower()
+        if len(key) >= 2 and key not in seen:
+            seen.add(key)
+            unique.append(cleaned)
+        if len(unique) >= max(1, int(limit)):
+            break
+    return unique
 
 
 class QwenCandidateReranker:
@@ -63,12 +96,21 @@ class QwenCandidateReranker:
     ) -> tuple[list[int], str]:
         if not candidates:
             return [], "[]"
+        decoded = self._generate(self._prompt(question, candidates), max_new_tokens=24)
+        return (
+            parse_rank_ids(
+                decoded,
+                candidate_count=len(candidates),
+                limit=limit,
+            ),
+            decoded,
+        )
+
+    def _generate(self, prompt: str, *, max_new_tokens: int) -> str:
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": self._prompt(question, candidates)}
-                ],
+                "content": [{"type": "text", "text": prompt}],
             }
         ]
         inputs = self.processor.apply_chat_template(
@@ -82,19 +124,21 @@ class QwenCandidateReranker:
         with self.torch.inference_mode():
             output = self.model.generate(
                 **inputs,
-                max_new_tokens=24,
+                max_new_tokens=max(1, int(max_new_tokens)),
                 do_sample=False,
             )
         prompt_length = int(inputs["input_ids"].shape[-1])
-        decoded = self.processor.decode(
+        return self.processor.decode(
             output[0][prompt_length:],
             skip_special_tokens=True,
         ).strip()
-        return (
-            parse_rank_ids(
-                decoded,
-                candidate_count=len(candidates),
-                limit=limit,
-            ),
-            decoded,
+
+    def rewrite_queries(self, question: str, *, limit: int = 3) -> tuple[list[str], str]:
+        prompt = (
+            "你是技术文档检索式生成器。根据问题生成三个彼此互补、可直接用于检索资料的简短查询。\n"
+            "保留问题中的英文缩写、数字、型号和专有名词；可补充通用同义表达，但不得回答问题或编造具体答案。\n"
+            "只返回 JSON 字符串数组，例如 [\"术语 规范\", \"缩写 定义\", \"操作 要求\"]。\n"
+            f"问题：{question}"
         )
+        decoded = self._generate(prompt, max_new_tokens=96)
+        return parse_query_list(decoded, limit=limit), decoded

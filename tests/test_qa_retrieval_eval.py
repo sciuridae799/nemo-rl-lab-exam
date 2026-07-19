@@ -11,6 +11,7 @@ from common.environments.qa_retrieval_eval import (
     _linear_reranker_cross_validation,
     _predict_linear_reranker,
     evaluate_llm_candidate_reranker,
+    evaluate_llm_query_rewrite,
     evaluate_retrieval_ab,
     evaluate_supervised_query_expansion,
     evidence_coverage,
@@ -67,6 +68,52 @@ def test_llm_candidate_reranker_report_uses_selected_ids(tmp_path):
 
     assert report["sample_count"] == 1
     assert report["mean_selected_count"] == 1.0
+
+
+def test_llm_query_rewrite_reports_recall_and_final_selection(tmp_path):
+    (tmp_path / "模块-试卷.md").write_text(
+        "# 试卷\n\n设备通过【1】连接系统。",
+        encoding="utf-8",
+    )
+    (tmp_path / "模块-答案.md").write_text(
+        "# 参考答案\n\n设备通过数据总线连接系统。",
+        encoding="utf-8",
+    )
+    index = LocalMarkdownIndex(tmp_path, chunk_chars=160)
+
+    class FakeQueryReranker:
+        def rewrite_queries(self, question, *, limit=3):
+            assert question and limit == 3
+            return ["数据总线 连接系统"], '["数据总线 连接系统"]'
+
+        def select(self, question, candidates, *, limit=3):
+            assert question and candidates and limit == 3
+            selected = next(
+                position
+                for position, (_, text) in enumerate(candidates)
+                if "数据总线" in text
+            )
+            return [selected], f"[{selected + 1}]"
+
+    report = evaluate_llm_query_rewrite(
+        [
+            {
+                "query": "下面是一道填空题。\n\n题目：设备通过【1】连接系统",
+                "expected_answer": "[fill] 数据总线",
+            }
+        ],
+        index,
+        FakeQueryReranker(),
+        max_per_type=1,
+        candidate_k=4,
+        candidate_max_per_source=2,
+        shortlist_size=4,
+    )
+
+    assert report["sample_count"] == 1
+    assert report["mean_rewrite_count"] == 1.0
+    assert report["rewrite_pool_evidence_coverage"] == 1.0
+    assert report["llm_top3_evidence_coverage"] == 1.0
 
 
 def test_retrieval_ab_reports_answer_evidence_gain(tmp_path):

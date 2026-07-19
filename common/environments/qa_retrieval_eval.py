@@ -726,6 +726,173 @@ def evaluate_llm_candidate_reranker(
     }
 
 
+def evaluate_llm_query_rewrite(
+    rows: list[dict[str, Any]],
+    index: LocalMarkdownIndex,
+    reranker: Any,
+    *,
+    input_key: str = "query",
+    output_key: str = "expected_answer",
+    max_per_type: int = 8,
+    seed: int = 42,
+    top_k: int = 3,
+    candidate_k: int = 80,
+    candidate_max_per_source: int = 4,
+    shortlist_size: int = 18,
+) -> dict[str, Any]:
+    """评估问题改写能否先提高召回，再由指令模型保留到 Top-K。
+
+    指令模型只接收题干和候选文本；期望答案仅用于训练集离线覆盖率测量。
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        question_type, _ = _gold_items(str(row.get(output_key, "")))
+        if question_type in _OPEN_TYPES:
+            grouped[question_type].append(row)
+    rng = random.Random(seed)
+    selected_rows: list[dict[str, Any]] = []
+    for question_type in sorted(_OPEN_TYPES):
+        candidates = list(grouped.get(question_type, []))
+        rng.shuffle(candidates)
+        selected_rows.extend(candidates[: max(1, int(max_per_type))])
+
+    values: dict[str, list[float]] = defaultdict(list)
+    by_type: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    rewrite_counts: list[float] = []
+    empty_rewrites = 0
+    empty_selections = 0
+    raw_examples: list[dict[str, Any]] = []
+
+    for row in selected_rows:
+        question = _question_text(str(row[input_key]))
+        expected = str(row[output_key])
+        question_type = _gold_items(expected)[0]
+        baseline_queries = build_query_variants(question)
+        baseline_candidates = index.search_union(
+            baseline_queries,
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        baseline_hits = rerank_answerable_hits(
+            question,
+            baseline_candidates,
+            top_k=top_k,
+            baseline_hits=index.search(question, top_k=1),
+        )
+
+        rewritten_queries, raw_rewrite = reranker.rewrite_queries(
+            question,
+            limit=3,
+        )
+        empty_rewrites += int(not rewritten_queries)
+        rewrite_counts.append(float(len(rewritten_queries)))
+        combined_queries = list(baseline_queries)
+        seen_queries = {compact_text(query) for query in combined_queries}
+        for query in rewritten_queries:
+            key = compact_text(query)
+            if key and key not in seen_queries:
+                seen_queries.add(key)
+                combined_queries.append(query)
+
+        rewritten_candidates = index.search_union(
+            combined_queries,
+            candidate_k=candidate_k,
+            max_per_source=candidate_max_per_source,
+        )
+        expanded_candidates = index.expand_structural_candidates(
+            question,
+            rewritten_candidates,
+            include_aligned_siblings=True,
+        )
+        default_hits = rerank_answerable_hits(
+            question,
+            expanded_candidates,
+            top_k=max(top_k, shortlist_size),
+            baseline_hits=index.search(question, top_k=1),
+        )
+        shortlist = default_hits[: max(top_k, int(shortlist_size))]
+        prompt_candidates: list[tuple[str, str]] = []
+        for hit in shortlist:
+            snippets = extract_answerable_snippets(
+                question,
+                [hit],
+                max_chars=220,
+            )
+            prompt_candidates.append(
+                (hit.source, snippets[0].text if snippets else hit.text[:220])
+            )
+        selected_positions, raw_rerank = reranker.select(
+            question,
+            prompt_candidates,
+            limit=top_k,
+        )
+        empty_selections += int(not selected_positions)
+        chosen = [shortlist[position] for position in selected_positions]
+        chosen_keys = {(hit.source, hit.text) for hit in chosen}
+        for hit in default_hits:
+            key = (hit.source, hit.text)
+            if key not in chosen_keys:
+                chosen.append(hit)
+                chosen_keys.add(key)
+            if len(chosen) >= top_k:
+                break
+        chosen = chosen[:top_k]
+
+        coverages = {
+            "baseline_top3": evidence_coverage(expected, baseline_hits),
+            "baseline_pool": evidence_coverage(expected, baseline_candidates),
+            "rewrite_pool": evidence_coverage(expected, rewritten_candidates),
+            "expanded_pool": evidence_coverage(expected, expanded_candidates),
+            "shortlist": evidence_coverage(expected, shortlist),
+            "llm_top3": evidence_coverage(expected, chosen),
+        }
+        for name, coverage in coverages.items():
+            values[name].append(coverage)
+            by_type[question_type][name].append(coverage)
+        if len(raw_examples) < 8:
+            raw_examples.append(
+                {
+                    "type": question_type,
+                    "rewritten_queries": rewritten_queries,
+                    "raw_rewrite": raw_rewrite[:240],
+                    "raw_rerank": raw_rerank[:120],
+                    **{f"{name}_coverage": value for name, value in coverages.items()},
+                }
+            )
+
+    summary = {f"{name}_evidence_coverage": _mean(stage) for name, stage in values.items()}
+    return {
+        "sample_count": len(selected_rows),
+        "max_per_type": int(max_per_type),
+        "seed": int(seed),
+        "top_k": int(top_k),
+        "shortlist_size": int(shortlist_size),
+        **summary,
+        "rewrite_pool_gain": summary.get("rewrite_pool_evidence_coverage", 0.0)
+        - summary.get("baseline_pool_evidence_coverage", 0.0),
+        "llm_gain_vs_baseline_top3": summary.get("llm_top3_evidence_coverage", 0.0)
+        - summary.get("baseline_top3_evidence_coverage", 0.0),
+        "final_selection_gap": summary.get("expanded_pool_evidence_coverage", 0.0)
+        - summary.get("llm_top3_evidence_coverage", 0.0),
+        "empty_rewrite_count": empty_rewrites,
+        "mean_rewrite_count": _mean(rewrite_counts),
+        "empty_selection_count": empty_selections,
+        "by_type": {
+            question_type: {
+                "count": len(type_values.get("baseline_top3", [])),
+                **{
+                    f"{name}_evidence_coverage": _mean(stage)
+                    for name, stage in sorted(type_values.items())
+                },
+            }
+            for question_type, type_values in sorted(by_type.items())
+        },
+        "raw_examples": raw_examples,
+    }
+
+
 def _fit_linear_reranker(
     groups: list[dict[str, Any]],
     *,
