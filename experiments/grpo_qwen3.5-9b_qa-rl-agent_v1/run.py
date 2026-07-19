@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import importlib.util
 import json
 import os
 import pprint
@@ -54,6 +56,76 @@ from common.environments.qa_search_env import QASearchEnv
 from common.utils.checkpoint_seed import seed_checkpoint_step
 
 TASK_NAME = "qa_search"
+
+
+def _runtime_capability_probe() -> None:
+    """只读检查远端已有语义检索能力，不初始化模型或索引。"""
+    package_names = (
+        "sentence-transformers",
+        "transformers",
+        "faiss-cpu",
+        "faiss-gpu",
+        "scikit-learn",
+        "numpy",
+    )
+    module_names = (
+        "sentence_transformers",
+        "transformers",
+        "faiss",
+        "sklearn",
+        "numpy",
+    )
+    packages: dict[str, str | None] = {}
+    for name in package_names:
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+
+    modules = {
+        name: importlib.util.find_spec(name) is not None for name in module_names
+    }
+    model_configs: list[dict[str, Any]] = []
+    for root_name in ("/data/huggingface", "/data/models"):
+        root = Path(root_name)
+        if not root.is_dir():
+            continue
+        for config_path in sorted(root.rglob("config.json")):
+            try:
+                relative = config_path.relative_to(root)
+                if len(relative.parts) > 7:
+                    continue
+                config_data = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+                continue
+            model_type = config_data.get("model_type")
+            architectures = config_data.get("architectures")
+            if not model_type and not architectures:
+                continue
+            model_configs.append(
+                {
+                    "path": str(config_path.parent),
+                    "model_type": model_type,
+                    "architectures": architectures,
+                }
+            )
+            if len(model_configs) >= 200:
+                break
+        if len(model_configs) >= 200:
+            break
+
+    print(
+        "QA远端能力探针："
+        + json.dumps(
+            {
+                "packages": packages,
+                "modules": modules,
+                "model_configs": model_configs,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 def parse_args():
@@ -291,6 +363,10 @@ def main():
 
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))
     pprint.pprint(config)
+
+    if bool(config.data.get("runtime_capability_probe", False)):
+        _runtime_capability_probe()
+        return
 
     if bool(config.data.get("retrieval_diagnostic", False)):
         _run_retrieval_diagnostic(config)

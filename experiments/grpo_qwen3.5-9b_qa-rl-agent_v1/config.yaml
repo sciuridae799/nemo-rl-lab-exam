@@ -56,6 +56,8 @@ data:
   input_key: query
   output_key: expected_answer
   data_dir: /data/datasets/qa_rl
+  # 不初始化 Qwen 或文档索引，只读检查远端已有语义检索依赖和模型。
+  runtime_capability_probe: true
   retrieval_diagnostic: false
   retrieval_diagnostic_max_per_type: 32
   retrieval_diagnostic_seed: 42
